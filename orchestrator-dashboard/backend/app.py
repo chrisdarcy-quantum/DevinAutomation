@@ -3,9 +3,6 @@ Feature Flag Removal Orchestration Dashboard - Lightweight Backend
 Single-file FastAPI application with all functionality consolidated.
 """
 
-# ============================================================================
-# ============================================================================
-
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -26,26 +23,17 @@ import os
 import time
 import requests
 
-# ============================================================================
-# ============================================================================
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# ============================================================================
-
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orchestrator.db")
 MAX_REPOS_PER_REQUEST = 5
 MAX_CONCURRENT_SESSIONS = 20
 POLL_INTERVAL = 10  # seconds
 TIMEOUT_THRESHOLD = 900  # 15 minutes in seconds
-
-# ============================================================================
-# ============================================================================
 
 engine = create_engine(
     DATABASE_URL,
@@ -55,8 +43,6 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ============================================================================
-# ============================================================================
 
 class RemovalRequest(Base):
     """Tracks high-level feature flag removal requests from users."""
@@ -128,8 +114,6 @@ def get_db():
     finally:
         db.close()
 
-# ============================================================================
-# ============================================================================
 
 class CreateRemovalRequest(BaseModel):
     """Request body for creating a new removal request."""
@@ -247,8 +231,6 @@ class LogsResponse(BaseModel):
     removal_request_id: int
     logs: List[SessionLogResponse]
 
-# ============================================================================
-# ============================================================================
 
 class SessionStatus(Enum):
     """Devin session status values"""
@@ -345,8 +327,6 @@ class DevinAPIClient:
             structured_output=data.get("structured_output")
         )
 
-# ============================================================================
-# ============================================================================
 
 class SessionMonitor:
     """Monitors active Devin sessions and updates database with latest status."""
@@ -664,8 +644,6 @@ If you cannot create a PR, set pr_url to null and explain in warnings.
         self.running = False
         logger.info("SessionQueue stopped")
 
-# ============================================================================
-# ============================================================================
 
 app = FastAPI(
     title="Feature Flag Removal Orchestration API",
@@ -689,8 +667,6 @@ monitor_task = None
 queue_task = None
 devin_client = None
 
-# ============================================================================
-# ============================================================================
 
 @app.on_event("startup")
 async def startup_event():
@@ -731,8 +707,6 @@ async def shutdown_event():
     
     logger.info("Background services stopped")
 
-# ============================================================================
-# ============================================================================
 
 @app.get("/")
 async def root():
@@ -1017,8 +991,6 @@ async def stream_removal_status(id: int, db: Session = Depends(get_db)):
     
     return EventSourceResponse(event_generator())
 
-# ============================================================================
-# ============================================================================
 
 def _build_removal_response(removal_request: RemovalRequest) -> RemovalRequestResponse:
     """Helper to build RemovalRequestResponse from database model."""
