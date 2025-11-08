@@ -436,7 +436,7 @@ function renderHistory() {
             const repoName = repo ? repo.url : (requests[0].repositories ? requests[0].repositories.join(', ') : 'Unknown');
             
             return `
-              <div class="card bg-gray-50">
+              <div class="card bg-gray-100">
                 <div class="p-4">
                   <h3 class="text-lg font-semibold text-gray-900 mb-4">
                     Repository: ${repoName}
@@ -461,6 +461,9 @@ function renderHistory() {
 function renderRequestCard(request) {
   const details = state.requestDetails?.[request.id];
   const sessions = details?.sessions || [];
+  
+  const devinLinks = sessions.map(s => s.devin_session_url).filter(Boolean);
+  const prLinks = sessions.map(s => s.pr_url || s.structured_output?.pr_url).filter(Boolean);
   
   return `
     <div class="card">
@@ -502,114 +505,24 @@ function renderRequestCard(request) {
             <p class="text-sm text-red-800">${request.error_message}</p>
           </div>
         ` : ''}
-        ${sessions.length > 0 ? `
-          <div class="mt-4 pt-4 border-t border-gray-200">
-            <h4 class="text-sm font-semibold text-gray-700 mb-3">Sessions</h4>
-            <div class="space-y-3">
-              ${sessions.map(session => `
-                <div class="border border-gray-200 rounded-lg p-3 bg-gray-50">
-                  <div class="flex justify-between items-start mb-2">
-                    <div class="flex-1">
-                      <p class="text-sm font-medium text-gray-900">${session.repository}</p>
-                      ${session.devin_session_url ? `
-                        <a href="${session.devin_session_url}" target="_blank" class="text-xs text-blue-600 hover:underline">
-                          View Devin Session →
-                        </a>
-                      ` : ''}
-                    </div>
-                    <span class="badge ${getStatusBadgeClass(session.status)} text-xs">${getStatusDisplayText(session.status)}</span>
-                  </div>
-                  <div class="grid grid-cols-2 gap-2 text-xs">
-                    ${session.started_at ? `
-                      <div>
-                        <span class="text-gray-500">Started:</span>
-                        <span class="ml-1">${formatDate(session.started_at)}</span>
-                      </div>
-                    ` : ''}
-                    ${session.completed_at ? `
-                      <div>
-                        <span class="text-gray-500">Completed:</span>
-                        <span class="ml-1">${formatDate(session.completed_at)}</span>
-                      </div>
-                    ` : ''}
-                    ${session.acu_consumed ? `
-                      <div>
-                        <span class="text-gray-500">ACU:</span>
-                        <span class="ml-1">${session.acu_consumed}</span>
-                      </div>
-                    ` : ''}
-                    ${session.pr_url || session.structured_output?.pr_url ? `
-                      <div class="col-span-2">
-                        <span class="text-gray-500">PR:</span>
-                        <a href="${session.pr_url || session.structured_output?.pr_url}" target="_blank" class="ml-1 text-blue-600 hover:underline break-all">
-                          ${session.pr_url || session.structured_output?.pr_url}
-                        </a>
-                      </div>
-                    ` : session.structured_output?.pr_url === null && session.structured_output?.warnings?.length > 0 ? `
-                      <div class="col-span-2 text-orange-600">
-                        <span class="text-gray-500">PR:</span>
-                        <span class="ml-1">No PR created (see warnings below)</span>
-                      </div>
-                    ` : ''}
-                  </div>
-                  ${session.error_message ? `
-                    <div class="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">
-                      ${session.error_message}
-                    </div>
-                  ` : ''}
-                  ${session.structured_output ? `
-                    <div class="mt-2 pt-2 border-t border-gray-300">
-                      ${session.structured_output.warnings?.length > 0 ? `
-                        <div class="mb-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
-                          <div class="font-semibold text-yellow-800 mb-1">⚠️ Warnings:</div>
-                          <ul class="list-disc list-inside text-yellow-800 space-y-1">
-                            ${session.structured_output.warnings.map(w => `<li>${w}</li>`).join('')}
-                          </ul>
-                        </div>
-                      ` : ''}
-                      ${session.structured_output.references_found_initially !== undefined || session.structured_output.references_removed !== undefined || session.structured_output.references_remaining !== undefined ? `
-                        <div class="grid grid-cols-3 gap-2 text-xs mb-2">
-                          ${session.structured_output.references_found_initially !== undefined ? `
-                            <div>
-                              <span class="text-gray-500">Found:</span>
-                              <span class="ml-1">${session.structured_output.references_found_initially}</span>
-                            </div>
-                          ` : ''}
-                          ${session.structured_output.references_removed !== undefined ? `
-                            <div>
-                              <span class="text-gray-500">Removed:</span>
-                              <span class="ml-1">${session.structured_output.references_removed}</span>
-                            </div>
-                          ` : ''}
-                          ${session.structured_output.references_remaining !== undefined ? `
-                            <div class="${session.structured_output.references_remaining > 0 ? 'text-orange-600 font-semibold' : ''}">
-                              <span class="text-gray-500">Remaining:</span>
-                              <span class="ml-1">${session.structured_output.references_remaining}</span>
-                            </div>
-                          ` : ''}
-                        </div>
-                      ` : ''}
-                      ${session.structured_output.test_command_run || session.structured_output.test_results ? `
-                        <div class="text-xs mb-2">
-                          ${session.structured_output.test_command_run ? `
-                            <div>
-                              <span class="text-gray-500">Test command:</span>
-                              <code class="ml-1 bg-gray-100 px-1 rounded">${session.structured_output.test_command_run}</code>
-                            </div>
-                          ` : ''}
-                          ${session.structured_output.test_results ? `
-                            <div>
-                              <span class="text-gray-500">Test results:</span>
-                              <span class="ml-1">${session.structured_output.test_results}</span>
-                            </div>
-                          ` : ''}
-                        </div>
-                      ` : ''}
-                    </div>
-                  ` : ''}
-                </div>
-              `).join('')}
-            </div>
+        ${devinLinks.length > 0 ? `
+          <div class="mt-2">
+            <span class="text-sm text-gray-500">Devin Sessions:</span>
+            ${devinLinks.map(url => `
+              <a href="${url}" target="_blank" class="ml-2 text-sm text-blue-600 hover:underline">
+                View Session →
+              </a>
+            `).join('')}
+          </div>
+        ` : ''}
+        ${prLinks.length > 0 ? `
+          <div class="mt-2">
+            <span class="text-sm text-gray-500">Pull Requests:</span>
+            ${prLinks.map(url => `
+              <a href="${url}" target="_blank" class="ml-2 text-sm text-blue-600 hover:underline break-all">
+                ${url}
+              </a>
+            `).join('')}
           </div>
         ` : ''}
       </div>
