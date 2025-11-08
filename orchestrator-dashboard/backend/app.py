@@ -681,7 +681,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "../frontend-vanilla")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "../frontend")
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
