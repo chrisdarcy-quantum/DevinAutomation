@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel, Field, validator, model_validator
+from pydantic import BaseModel, Field, validator, model_validator, ConfigDict
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from dataclasses import dataclass
@@ -145,27 +145,20 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     
     if "sqlite" in DATABASE_URL:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE removal_requests ADD COLUMN preserve_mode TEXT DEFAULT 'enabled' NOT NULL"))
-                conn.commit()
-                logger.info("Added preserve_mode column to removal_requests table")
-        except Exception as e:
-            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
-                pass
-            else:
-                logger.warning(f"Could not add preserve_mode column (may already exist): {e}")
+        migrations = [
+            ("preserve_mode", "ALTER TABLE removal_requests ADD COLUMN preserve_mode TEXT DEFAULT 'enabled' NOT NULL"),
+            ("repository_id", "ALTER TABLE removal_requests ADD COLUMN repository_id INTEGER")
+        ]
         
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE removal_requests ADD COLUMN repository_id INTEGER"))
-                conn.commit()
-                logger.info("Added repository_id column to removal_requests table")
-        except Exception as e:
-            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
-                pass
-            else:
-                logger.warning(f"Could not add repository_id column (may already exist): {e}")
+        for column_name, sql in migrations:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(sql))
+                    conn.commit()
+                    logger.info(f"Added {column_name} column to removal_requests table")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
+                    logger.warning(f"Could not add {column_name} column (may already exist): {e}")
 
 
 def get_db():
@@ -216,9 +209,13 @@ class CreateRemovalRequest(BaseModel):
         return self
 
 
-class SessionResponse(BaseModel):
+class APIModel(BaseModel):
+    """Base model for API responses with common config."""
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SessionResponse(APIModel):
     """Response model for a Devin session."""
-    
     id: int
     repository: str
     devin_session_id: Optional[str]
@@ -230,14 +227,10 @@ class SessionResponse(BaseModel):
     completed_at: Optional[datetime]
     error_message: Optional[str]
     acu_consumed: Optional[int]
-    
-    class Config:
-        from_attributes = True
 
 
-class RemovalRequestResponse(BaseModel):
+class RemovalRequestResponse(APIModel):
     """Response model for a removal request."""
-    
     id: int
     flag_key: str
     repositories: List[str]
@@ -250,14 +243,10 @@ class RemovalRequestResponse(BaseModel):
     error_message: Optional[str]
     total_acu_consumed: int
     sessions: List[SessionResponse] = []
-    
-    class Config:
-        from_attributes = True
 
 
-class RemovalRequestListItem(BaseModel):
+class RemovalRequestListItem(APIModel):
     """Simplified response model for list view."""
-    
     id: int
     flag_key: str
     repositories: List[str]
@@ -270,44 +259,34 @@ class RemovalRequestListItem(BaseModel):
     session_count: int
     completed_sessions: int
     failed_sessions: int
-    
-    class Config:
-        from_attributes = True
 
 
 class RemovalRequestListResponse(BaseModel):
     """Response model for list of removal requests with pagination."""
-    
     total: int
     limit: int
     offset: int
     results: List[RemovalRequestListItem]
 
 
-class SessionLogResponse(BaseModel):
+class SessionLogResponse(APIModel):
     """Response model for a session log entry."""
-    
     id: int
     devin_session_id: int
     timestamp: datetime
     log_level: str
     message: str
     event_type: Optional[str]
-    
-    class Config:
-        from_attributes = True
 
 
 class LogsResponse(BaseModel):
     """Response model for logs endpoint."""
-    
     removal_request_id: int
     logs: List[SessionLogResponse]
 
 
 class CreateRepository(BaseModel):
     """Request body for creating a new repository."""
-    
     url: str = Field(..., min_length=1, description="Repository URL")
     github_token: Optional[str] = Field(None, description="GitHub token for private repos")
     
@@ -322,23 +301,18 @@ class CreateRepository(BaseModel):
         return v
 
 
-class RepositoryResponse(BaseModel):
+class RepositoryResponse(APIModel):
     """Response model for a repository."""
-    
     id: int
     url: str
     provider_detected: Optional[str]
     last_scanned_at: Optional[datetime]
     created_at: datetime
     flag_count: int = 0
-    
-    class Config:
-        from_attributes = True
 
 
-class DiscoveredFlagResponse(BaseModel):
+class DiscoveredFlagResponse(APIModel):
     """Response model for a discovered flag."""
-    
     id: int
     repository_id: int
     flag_key: str
@@ -347,9 +321,6 @@ class DiscoveredFlagResponse(BaseModel):
     provider: Optional[str]
     last_seen_at: datetime
     repository_url: Optional[str] = None
-    
-    class Config:
-        from_attributes = True
 
 
 class SessionStatus(Enum):
@@ -1348,12 +1319,35 @@ async def delete_repository(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _format_flag_response(flag: DiscoveredFlag, repository_url: Optional[str] = None) -> DiscoveredFlagResponse:
+    """Helper to format a DiscoveredFlag as a response object."""
+    files = []
+    if flag.files:
+        try:
+            files = json.loads(flag.files)
+        except:
+            pass
+    
+    if repository_url is None and flag.repository:
+        repository_url = flag.repository.url
+    
+    return DiscoveredFlagResponse(
+        id=flag.id,
+        repository_id=flag.repository_id,
+        flag_key=flag.flag_key,
+        occurrences=flag.occurrences,
+        files=files,
+        provider=flag.provider,
+        last_seen_at=flag.last_seen_at,
+        repository_url=repository_url
+    )
+
+
 @app.get("/api/repositories/{id}/flags", response_model=List[DiscoveredFlagResponse])
 async def get_repository_flags(id: int, db: Session = Depends(get_db)):
     """Get all discovered flags for a specific repository."""
     try:
         repository = db.query(Repository).filter_by(id=id).first()
-        
         if not repository:
             raise HTTPException(status_code=404, detail="Repository not found")
         
@@ -1361,27 +1355,7 @@ async def get_repository_flags(id: int, db: Session = Depends(get_db)):
             DiscoveredFlag.last_seen_at.desc()
         ).all()
         
-        results = []
-        for flag in flags:
-            files = []
-            if flag.files:
-                try:
-                    files = json.loads(flag.files)
-                except:
-                    pass
-            
-            results.append(DiscoveredFlagResponse(
-                id=flag.id,
-                repository_id=flag.repository_id,
-                flag_key=flag.flag_key,
-                occurrences=flag.occurrences,
-                files=files,
-                provider=flag.provider,
-                last_seen_at=flag.last_seen_at,
-                repository_url=repository.url
-            ))
-        
-        return results
+        return [_format_flag_response(flag, repository.url) for flag in flags]
         
     except HTTPException:
         raise
@@ -1407,32 +1381,7 @@ async def list_flags(
             query = query.filter(DiscoveredFlag.provider == provider)
         
         flags = query.order_by(DiscoveredFlag.last_seen_at.desc()).all()
-        
-        results = []
-        for flag in flags:
-            files = []
-            if flag.files:
-                try:
-                    files = json.loads(flag.files)
-                except:
-                    pass
-            
-            repository_url = None
-            if flag.repository:
-                repository_url = flag.repository.url
-            
-            results.append(DiscoveredFlagResponse(
-                id=flag.id,
-                repository_id=flag.repository_id,
-                flag_key=flag.flag_key,
-                occurrences=flag.occurrences,
-                files=files,
-                provider=flag.provider,
-                last_seen_at=flag.last_seen_at,
-                repository_url=repository_url
-            ))
-        
-        return results
+        return [_format_flag_response(flag) for flag in flags]
         
     except Exception as e:
         logger.error(f"Error listing flags: {e}", exc_info=True)

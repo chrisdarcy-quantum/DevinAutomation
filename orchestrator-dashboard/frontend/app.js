@@ -24,74 +24,57 @@ function setState(updates) {
 }
 
 
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    if (options.errorMessage) throw new Error(options.errorMessage);
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Request failed');
+  }
+  return response.status === 204 ? null : response.json();
+}
+
 const api = {
   async listRemovals(params = {}) {
     const queryString = new URLSearchParams(params).toString();
-    const url = `${API_BASE_URL}/api/removals${queryString ? '?' + queryString : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Failed to load requests');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/removals${queryString ? '?' + queryString : ''}`);
   },
 
   async getRemoval(id) {
-    const response = await fetch(`${API_BASE_URL}/api/removals/${id}`);
-    if (!response.ok) throw new Error('Failed to load request details');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/removals/${id}`);
   },
 
   async createRemoval(data) {
-    const response = await fetch(`${API_BASE_URL}/api/removals`, {
+    return fetchJson(`${API_BASE_URL}/api/removals`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Failed to create request');
-    }
-    return response.json();
   },
 
   async listRepositories() {
-    const response = await fetch(`${API_BASE_URL}/api/repositories`);
-    if (!response.ok) throw new Error('Failed to load repositories');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/repositories`);
   },
 
   async createRepository(data) {
-    const response = await fetch(`${API_BASE_URL}/api/repositories`, {
+    return fetchJson(`${API_BASE_URL}/api/repositories`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Failed to create repository');
-    }
-    return response.json();
   },
 
   async deleteRepository(id) {
-    const response = await fetch(`${API_BASE_URL}/api/repositories/${id}`, {
-      method: 'DELETE'
-    });
-    if (!response.ok) throw new Error('Failed to delete repository');
+    return fetchJson(`${API_BASE_URL}/api/repositories/${id}`, { method: 'DELETE' });
   },
 
   async scanRepository(id) {
-    const response = await fetch(`${API_BASE_URL}/api/repositories/${id}/scan`, {
-      method: 'POST'
-    });
-    if (!response.ok) throw new Error('Failed to start scan');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/repositories/${id}/scan`, { method: 'POST' });
   },
 
   async listFlags(params = {}) {
     const queryString = new URLSearchParams(params).toString();
-    const url = `${API_BASE_URL}/api/flags${queryString ? '?' + queryString : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Failed to load flags');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/flags${queryString ? '?' + queryString : ''}`);
   },
 
   streamStatus(id, onUpdate) {
