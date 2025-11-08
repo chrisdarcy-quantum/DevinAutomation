@@ -1049,5 +1049,48 @@ class TestDiscoveryPrompt(unittest.TestCase):
         self.assertNotIn('"acu_consumed": 450', prompt)
 
 
+    def test_discovery_results_persistence(self):
+        """Test that discovery scan results are properly persisted to database."""
+        repo = Repository(
+            url='https://github.com/test/discovery-repo',
+            created_at=datetime.utcnow()
+        )
+        self.db.add(repo)
+        self.db.commit()
+        self.db.refresh(repo)
+        
+        discovery_output = {
+            'provider': 'Custom',
+            'flags': [
+                {'key': 'feature_a', 'occurrences': 10, 'files': ['app.js', 'utils.js']},
+                {'key': 'feature_b', 'occurrences': 5, 'files': ['index.js']}
+            ],
+            'total_flags': 2,
+            'total_occurrences': 15,
+            'warnings': [],
+            'acu_consumed': 1
+        }
+        
+        monitor = SessionMonitor(self.mock_client)
+        import asyncio
+        asyncio.run(monitor.persist_discovery_results(self.db, repo.url, discovery_output))
+        self.db.commit()
+        
+        updated_repo = self.db.query(Repository).filter_by(id=repo.id).first()
+        self.assertEqual(updated_repo.provider_detected, 'Custom')
+        self.assertIsNotNone(updated_repo.last_scanned_at)
+        
+        flags = self.db.query(DiscoveredFlag).filter_by(repository_id=repo.id).all()
+        self.assertEqual(len(flags), 2)
+        
+        flag_a = next(f for f in flags if f.flag_key == 'feature_a')
+        self.assertEqual(flag_a.occurrences, 10)
+        self.assertEqual(flag_a.provider, 'Custom')
+        self.assertIn('app.js', json.loads(flag_a.files))
+        
+        flag_b = next(f for f in flags if f.flag_key == 'feature_b')
+        self.assertEqual(flag_b.occurrences, 5)
+
+
 if __name__ == '__main__':
     unittest.main()
