@@ -72,13 +72,13 @@ class DevinSession(Base):
     __tablename__ = "devin_sessions"
     
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    removal_request_id = Column(Integer, ForeignKey("removal_requests.id"), nullable=False, index=True)
+    removal_request_id = Column(Integer, ForeignKey("removal_requests.id", ondelete="SET NULL"), nullable=True, index=True)
     repository = Column(String, nullable=False)
     devin_session_id = Column(String, nullable=True, index=True)
     devin_session_url = Column(String, nullable=True)
     status = Column(String, nullable=False, default="pending", index=True)
     pr_url = Column(String, nullable=True)
-    structured_output = Column(Text, nullable=True)  # JSON
+    structured_output = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
