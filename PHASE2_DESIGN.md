@@ -995,6 +995,825 @@ def calculate_request_status(sessions):
 
 ---
 
+## Background Services Architecture
+
+### Session Monitor Service
+
+**Purpose**: Continuously monitor active Devin sessions and update the database with latest status.
+
+**Architecture**:
+```python
+# Background worker that runs as a FastAPI background task
+class SessionMonitor:
+    def __init__(self, db, devin_client):
+        self.db = db
+        self.devin_client = devin_client
+        self.poll_interval = 10  # seconds
+        self.running = True
+    
+    async def start(self):
+        """Main monitoring loop"""
+        while self.running:
+            try:
+                await self.poll_active_sessions()
+                await asyncio.sleep(self.poll_interval)
+            except Exception as e:
+                logger.error(f"Monitor error: {e}")
+                await asyncio.sleep(self.poll_interval)
+    
+    async def poll_active_sessions(self):
+        """Poll all active Devin sessions for status updates"""
+        # Get sessions that are not yet complete
+        active_sessions = self.db.query(
+            devin_sessions
+        ).filter(
+            devin_sessions.status.in_(['pending', 'claimed', 'working', 'blocked'])
+        ).all()
+        
+        for session in active_sessions:
+            try:
+                # Get latest status from Devin API
+                details = self.devin_client.get_session_details(
+                    session.devin_session_id
+                )
+                
+                # Update database
+                await self.update_session_status(session, details)
+                
+                # Log status change
+                await self.log_status_change(session, details)
+                
+                # Check for completion
+                if details.status_enum in ['finished', 'expired']:
+                    await self.handle_completion(session, details)
+                
+                # Check for timeout
+                await self.check_timeout(session)
+                
+            except Exception as e:
+                logger.error(f"Error polling session {session.id}: {e}")
+                await self.handle_poll_error(session, e)
+    
+    async def update_session_status(self, session, details):
+        """Update session status in database"""
+        self.db.update(devin_sessions).where(
+            devin_sessions.id == session.id
+        ).values(
+            status=details.status_enum,
+            pr_url=details.pull_request.get('url') if details.pull_request else None,
+            structured_output=json.dumps(details.structured_output) if details.structured_output else None,
+            completed_at=datetime.now() if details.status_enum in ['finished', 'expired'] else None
+        )
+        self.db.commit()
+    
+    async def check_timeout(self, session):
+        """Check if session has exceeded timeout threshold"""
+        if not session.started_at:
+            return
+        
+        elapsed = (datetime.now() - session.started_at).total_seconds()
+        timeout_threshold = 900  # 15 minutes
+        
+        if elapsed > timeout_threshold and session.status == 'working':
+            logger.warning(f"Session {session.id} exceeded timeout threshold")
+            await self.handle_timeout(session)
+    
+    async def handle_timeout(self, session):
+        """Handle session timeout"""
+        self.db.update(devin_sessions).where(
+            devin_sessions.id == session.id
+        ).values(
+            status='expired',
+            error_message='Session timed out after 15 minutes',
+            completed_at=datetime.now()
+        )
+        
+        await self.log_event(
+            session.id, 
+            'error', 
+            'Session timed out after 15 minutes',
+            'timeout'
+        )
+```
+
+**Implementation Options**:
+
+1. **FastAPI Background Task** (Recommended for MVP)
+   ```python
+   from fastapi import BackgroundTasks
+   
+   @app.on_event("startup")
+   async def startup_event():
+       monitor = SessionMonitor(db, devin_client)
+       asyncio.create_task(monitor.start())
+   ```
+   - ✅ Simple, single-process
+   - ✅ No additional infrastructure
+   - ❌ Stops if app restarts
+   - ❌ Single instance only
+
+2. **Celery Worker** (Future/Production)
+   ```python
+   from celery import Celery
+   
+   @celery.task
+   def poll_sessions():
+       monitor = SessionMonitor(db, devin_client)
+       monitor.poll_active_sessions()
+   
+   # Schedule every 10 seconds
+   celery.conf.beat_schedule = {
+       'poll-sessions': {
+           'task': 'poll_sessions',
+           'schedule': 10.0,
+       },
+   }
+   ```
+   - ✅ Distributed, scalable
+   - ✅ Survives app restarts
+   - ✅ Can run multiple workers
+   - ❌ Requires Redis/RabbitMQ
+
+**For Phase 2**: Use **FastAPI BackgroundTasks**
+
+---
+
+## Real-Time Updates Strategy
+
+### Server-Sent Events (SSE)
+
+**Why SSE over WebSockets or Polling**:
+- ✅ Simpler than WebSockets (one-way communication is sufficient)
+- ✅ More efficient than polling (server pushes updates)
+- ✅ Native browser support (EventSource API)
+- ✅ Automatic reconnection
+- ✅ Works through most firewalls/proxies
+
+**Backend Implementation**:
+```python
+from fastapi import FastAPI
+from sse_starlette.sse import EventSourceResponse
+import asyncio
+
+@app.get("/api/removals/{id}/stream")
+async def stream_removal_status(id: int):
+    """
+    Stream real-time status updates for a removal request.
+    Client connects and receives updates as they happen.
+    """
+    async def event_generator():
+        last_update = None
+        
+        while True:
+            # Get current status
+            removal = db.query(removal_requests).filter_by(id=id).first()
+            
+            if not removal:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"error": "Removal request not found"})
+                }
+                break
+            
+            # Get all sessions
+            sessions = db.query(devin_sessions).filter_by(
+                removal_request_id=id
+            ).all()
+            
+            # Build status update
+            status_data = {
+                "removal_id": removal.id,
+                "status": removal.status,
+                "updated_at": removal.updated_at.isoformat(),
+                "sessions": [
+                    {
+                        "id": s.id,
+                        "repository": s.repository,
+                        "status": s.status,
+                        "pr_url": s.pr_url
+                    }
+                    for s in sessions
+                ]
+            }
+            
+            # Only send if data changed
+            current_hash = hash(json.dumps(status_data, sort_keys=True))
+            if current_hash != last_update:
+                yield {
+                    "event": "status_update",
+                    "data": json.dumps(status_data)
+                }
+                last_update = current_hash
+            
+            # Send heartbeat every 30 seconds
+            yield {
+                "event": "heartbeat",
+                "data": json.dumps({"timestamp": datetime.now().isoformat()})
+            }
+            
+            # Exit if completed
+            if removal.status in ['completed', 'failed']:
+                yield {
+                    "event": "complete",
+                    "data": json.dumps({"status": removal.status})
+                }
+                break
+            
+            await asyncio.sleep(5)  # Poll every 5 seconds
+    
+    return EventSourceResponse(event_generator())
+```
+
+**Frontend Implementation**:
+```typescript
+// React hook for SSE
+function useRemovalStatus(removalId: number) {
+  const [status, setStatus] = useState<RemovalStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const eventSource = new EventSource(
+      `/api/removals/${removalId}/stream`
+    );
+
+    eventSource.addEventListener('status_update', (event) => {
+      const data = JSON.parse(event.data);
+      setStatus(data);
+    });
+
+    eventSource.addEventListener('error', (event) => {
+      const data = JSON.parse(event.data);
+      setError(data.error);
+      eventSource.close();
+    });
+
+    eventSource.addEventListener('complete', (event) => {
+      eventSource.close();
+    });
+
+    return () => {
+      eventSource.close();
+    };
+  }, [removalId]);
+
+  return { status, error };
+}
+
+// Usage in component
+function RemovalDetail({ id }: { id: number }) {
+  const { status, error } = useRemovalStatus(id);
+
+  return (
+    <div>
+      {status && (
+        <div>
+          <h2>Status: {status.status}</h2>
+          {status.sessions.map(session => (
+            <SessionCard key={session.id} session={session} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**Dependencies**:
+```bash
+# Backend
+pip install sse-starlette
+
+# Frontend (built-in EventSource API, no extra deps needed)
+```
+
+---
+
+## Concurrency & Rate Limiting
+
+### Rate Limiting
+
+**Per-User Limits**:
+```python
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.post("/api/removals")
+@limiter.limit("5/minute")  # 5 requests per minute per user
+async def create_removal(request: Request, body: CreateRemovalRequest):
+    # ... implementation
+    pass
+```
+
+**Global Concurrency Limits**:
+```python
+# Configuration
+MAX_CONCURRENT_SESSIONS = 20
+MAX_REPOS_PER_REQUEST = 5
+MAX_REQUESTS_PER_USER_DAILY = 50
+
+async def check_concurrency_limits():
+    """Check if system is at capacity"""
+    active_count = db.query(devin_sessions).filter(
+        devin_sessions.status.in_(['pending', 'claimed', 'working'])
+    ).count()
+    
+    if active_count >= MAX_CONCURRENT_SESSIONS:
+        return {
+            "allowed": False,
+            "reason": "System at capacity",
+            "retry_after": 300,  # 5 minutes
+            "active_sessions": active_count,
+            "max_sessions": MAX_CONCURRENT_SESSIONS
+        }
+    
+    return {"allowed": True}
+
+@app.post("/api/removals")
+async def create_removal(request: Request, body: CreateRemovalRequest):
+    # Check limits
+    limit_check = await check_concurrency_limits()
+    if not limit_check["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail=limit_check,
+            headers={"Retry-After": str(limit_check["retry_after"])}
+        )
+    
+    # Validate repo count
+    if len(body.repositories) > MAX_REPOS_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_REPOS_PER_REQUEST} repositories per request"
+        )
+    
+    # ... create removal
+```
+
+### Queue-Based Session Creation
+
+**Why Queue-Based**:
+- ✅ Controlled concurrency (don't overwhelm Devin API)
+- ✅ Better error recovery (can retry queued items)
+- ✅ Prevents rate limit issues
+- ✅ Fair distribution of resources
+
+**Implementation**:
+```python
+class SessionQueue:
+    """Queue for managing Devin session creation"""
+    
+    def __init__(self, db, devin_client, max_concurrent=20):
+        self.db = db
+        self.devin_client = devin_client
+        self.max_concurrent = max_concurrent
+        self.running = True
+    
+    async def start(self):
+        """Process queue continuously"""
+        while self.running:
+            try:
+                # Check if we have capacity
+                active_count = self.get_active_count()
+                
+                if active_count < self.max_concurrent:
+                    # Get next pending session
+                    session = self.db.query(devin_sessions).filter_by(
+                        status='pending'
+                    ).order_by(
+                        devin_sessions.id  # FIFO
+                    ).first()
+                    
+                    if session:
+                        await self.start_session(session)
+                
+                await asyncio.sleep(5)  # Check every 5 seconds
+                
+            except Exception as e:
+                logger.error(f"Queue error: {e}")
+                await asyncio.sleep(5)
+    
+    async def start_session(self, session):
+        """Start a Devin session"""
+        try:
+            # Build prompt
+            prompt = build_removal_prompt(
+                flag_key=session.removal_request.flag_key,
+                repository=session.repository,
+                provider=session.removal_request.feature_flag_provider
+            )
+            
+            # Create Devin session
+            devin_session = self.devin_client.create_session(
+                prompt=prompt,
+                title=f"Remove flag: {session.removal_request.flag_key}",
+                tags=["flag-removal", session.removal_request.flag_key],
+                idempotent=True
+            )
+            
+            # Update database
+            self.db.update(devin_sessions).where(
+                devin_sessions.id == session.id
+            ).values(
+                devin_session_id=devin_session.session_id,
+                devin_session_url=devin_session.url,
+                status='claimed',
+                started_at=datetime.now()
+            )
+            self.db.commit()
+            
+            logger.info(f"Started session {session.id}: {devin_session.session_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start session {session.id}: {e}")
+            self.db.update(devin_sessions).where(
+                devin_sessions.id == session.id
+            ).values(
+                status='failed',
+                error_message=str(e)
+            )
+            self.db.commit()
+    
+    def get_active_count(self):
+        """Get count of active Devin sessions"""
+        return self.db.query(devin_sessions).filter(
+            devin_sessions.status.in_(['pending', 'claimed', 'working'])
+        ).count()
+```
+
+**Lifecycle with Queue**:
+```
+User creates removal request
+    ↓
+Sessions created with status='pending'
+    ↓
+SessionQueue picks up pending sessions
+    ↓
+Queue checks if under MAX_CONCURRENT
+    ↓
+If yes: Create Devin session, set status='claimed'
+If no: Wait until capacity available
+    ↓
+SessionMonitor polls active sessions
+    ↓
+On completion: status='finished', capacity freed
+```
+
+---
+
+## Cost Management & Budget Tracking
+
+### ACU (Anthropic Compute Units) Tracking
+
+**Database Schema Addition**:
+```sql
+ALTER TABLE devin_sessions ADD COLUMN max_acu_limit INTEGER DEFAULT 500;
+ALTER TABLE devin_sessions ADD COLUMN acu_consumed INTEGER;
+ALTER TABLE removal_requests ADD COLUMN total_acu_consumed INTEGER DEFAULT 0;
+
+-- Add budget tracking table
+CREATE TABLE budget_tracking (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT NOT NULL,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    acu_limit INTEGER NOT NULL,
+    acu_consumed INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_email, period_start)
+);
+
+CREATE INDEX idx_budget_user_period ON budget_tracking(user_email, period_start);
+```
+
+**Budget Enforcement**:
+```python
+async def check_budget(user_email: str, estimated_acu: int = 500):
+    """Check if user has budget for this request"""
+    today = date.today()
+    period_start = date(today.year, today.month, 1)  # Monthly budget
+    period_end = period_start + timedelta(days=32)
+    period_end = period_end.replace(day=1) - timedelta(days=1)
+    
+    # Get or create budget record
+    budget = db.query(budget_tracking).filter_by(
+        user_email=user_email,
+        period_start=period_start
+    ).first()
+    
+    if not budget:
+        budget = budget_tracking(
+            user_email=user_email,
+            period_start=period_start,
+            period_end=period_end,
+            acu_limit=10000  # Default monthly limit
+        )
+        db.add(budget)
+        db.commit()
+    
+    # Check remaining budget
+    remaining = budget.acu_limit - budget.acu_consumed
+    
+    if remaining < estimated_acu:
+        return {
+            "allowed": False,
+            "reason": "Budget exceeded",
+            "limit": budget.acu_limit,
+            "consumed": budget.acu_consumed,
+            "remaining": remaining,
+            "period_end": budget.period_end.isoformat()
+        }
+    
+    return {
+        "allowed": True,
+        "remaining": remaining
+    }
+
+@app.post("/api/removals")
+async def create_removal(request: Request, body: CreateRemovalRequest):
+    # Check budget
+    budget_check = await check_budget(
+        body.created_by,
+        estimated_acu=len(body.repositories) * 500  # Estimate per repo
+    )
+    
+    if not budget_check["allowed"]:
+        raise HTTPException(
+            status_code=402,  # Payment Required
+            detail=budget_check
+        )
+    
+    # ... create removal
+```
+
+**UI Budget Display**:
+```typescript
+// Show budget in create form
+<div className="p-4 bg-blue-50 rounded">
+  <h3>Estimated Cost</h3>
+  <p>Repositories: {repositories.length}</p>
+  <p>Estimated ACU: ~{repositories.length * 500}</p>
+  <p>Your remaining budget: {budget.remaining} ACU</p>
+  <p>Resets: {budget.period_end}</p>
+</div>
+```
+
+**ACU Tracking from Devin**:
+```python
+async def update_acu_consumption(session_id: int):
+    """Update ACU consumption after session completes"""
+    session = db.query(devin_sessions).filter_by(id=session_id).first()
+    
+    # Get ACU from Devin API (if available in structured_output)
+    if session.structured_output:
+        output = json.loads(session.structured_output)
+        acu_used = output.get('acu_consumed', 0)
+        
+        # Update session
+        db.update(devin_sessions).where(
+            devin_sessions.id == session_id
+        ).values(acu_consumed=acu_used)
+        
+        # Update removal request total
+        db.execute(f"""
+            UPDATE removal_requests 
+            SET total_acu_consumed = (
+                SELECT SUM(acu_consumed) 
+                FROM devin_sessions 
+                WHERE removal_request_id = {session.removal_request_id}
+            )
+            WHERE id = {session.removal_request_id}
+        """)
+        
+        # Update user budget
+        request = db.query(removal_requests).filter_by(
+            id=session.removal_request_id
+        ).first()
+        
+        period_start = date.today().replace(day=1)
+        db.execute(f"""
+            UPDATE budget_tracking
+            SET acu_consumed = acu_consumed + {acu_used}
+            WHERE user_email = '{request.created_by}'
+            AND period_start = '{period_start}'
+        """)
+        
+        db.commit()
+```
+
+---
+
+## Security & Validation
+
+### Input Validation
+
+**Repository URL Validation**:
+```python
+from urllib.parse import urlparse
+
+ALLOWED_GITHUB_ORGS = ["example", "example-org"]  # From config
+
+def validate_repository_url(url: str) -> tuple[bool, str]:
+    """Validate repository URL"""
+    try:
+        parsed = urlparse(url)
+        
+        # Must be HTTPS GitHub URL
+        if parsed.scheme != "https":
+            return False, "Repository URL must use HTTPS"
+        
+        if parsed.netloc != "github.com":
+            return False, "Only GitHub repositories are supported"
+        
+        # Parse owner/repo from path
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) < 2:
+            return False, "Invalid repository URL format"
+        
+        owner, repo = path_parts[0], path_parts[1]
+        
+        # Check allowlist
+        if owner not in ALLOWED_GITHUB_ORGS:
+            return False, f"Organization '{owner}' is not in the allowlist"
+        
+        return True, ""
+        
+    except Exception as e:
+        return False, f"Invalid URL: {str(e)}"
+
+# Pydantic model with validation
+from pydantic import BaseModel, validator
+
+class CreateRemovalRequest(BaseModel):
+    flag_key: str
+    repositories: List[str]
+    feature_flag_provider: Optional[str]
+    created_by: str
+    
+    @validator('flag_key')
+    def validate_flag_key(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError("Flag key cannot be empty")
+        if len(v) > 200:
+            raise ValueError("Flag key too long (max 200 characters)")
+        return v.strip()
+    
+    @validator('repositories')
+    def validate_repositories(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError("At least one repository required")
+        if len(v) > MAX_REPOS_PER_REQUEST:
+            raise ValueError(f"Maximum {MAX_REPOS_PER_REQUEST} repositories allowed")
+        
+        for url in v:
+            valid, error = validate_repository_url(url)
+            if not valid:
+                raise ValueError(f"Invalid repository URL '{url}': {error}")
+        
+        return v
+    
+    @validator('created_by')
+    def validate_email(cls, v):
+        import re
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_regex, v):
+            raise ValueError("Invalid email format")
+        return v.lower()
+```
+
+### Authentication (Future)
+
+**For Phase 2**: No authentication (PoC only)
+
+**For Phase 3+**: Add GitHub OAuth
+```python
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Verify and get current user from token"""
+    # Verify GitHub OAuth token
+    # Return user info
+    pass
+
+@app.post("/api/removals")
+async def create_removal(
+    body: CreateRemovalRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    # User is authenticated
+    body.created_by = current_user["email"]
+    # ... proceed
+```
+
+### CSRF Protection
+
+```python
+from fastapi_csrf_protect import CsrfProtect
+
+@app.post("/api/removals")
+async def create_removal(
+    request: Request,
+    csrf_protect: CsrfProtect = Depends()
+):
+    await csrf_protect.validate_csrf(request)
+    # ... proceed
+```
+
+---
+
+## Structured Output Contract
+
+### Expected Schema from Devin
+
+**Define expected output structure**:
+```python
+from typing import Optional, List
+from pydantic import BaseModel
+
+class DevinStructuredOutput(BaseModel):
+    """Expected structure from Devin"""
+    pr_url: Optional[str] = None
+    files_modified: Optional[List[str]] = None
+    occurrences_removed: Optional[int] = None
+    test_results: Optional[str] = None
+    warnings: Optional[List[str]] = None
+    acu_consumed: Optional[int] = None
+    
+    # Handle free-form output
+    raw_output: Optional[dict] = None
+
+def parse_devin_output(structured_output: Optional[str]) -> DevinStructuredOutput:
+    """
+    Parse Devin's structured output with fallbacks.
+    Devin may return different formats, so be flexible.
+    """
+    if not structured_output:
+        return DevinStructuredOutput()
+    
+    try:
+        data = json.loads(structured_output)
+        
+        # Try to extract known fields
+        return DevinStructuredOutput(
+            pr_url=data.get('pr_url') or data.get('pull_request'),
+            files_modified=data.get('files_modified') or data.get('files_changed'),
+            occurrences_removed=data.get('occurrences_removed') or data.get('matches_removed'),
+            test_results=data.get('test_results') or data.get('tests'),
+            warnings=data.get('warnings') or [],
+            acu_consumed=data.get('acu_consumed'),
+            raw_output=data  # Store original for debugging
+        )
+        
+    except json.JSONDecodeError:
+        # Not valid JSON, store as raw
+        logger.warning(f"Could not parse structured output as JSON: {structured_output}")
+        return DevinStructuredOutput(raw_output={"raw": structured_output})
+    
+    except Exception as e:
+        logger.error(f"Error parsing structured output: {e}")
+        return DevinStructuredOutput(raw_output={"error": str(e)})
+```
+
+**Prompt Template with Output Requirements**:
+```python
+def build_removal_prompt(flag_key: str, repository: str, provider: str) -> str:
+    return f"""
+Task: Remove feature flag from codebase
+
+Flag Key: {flag_key}
+Repository: {repository}
+Provider: {provider or 'Unknown'}
+
+Instructions:
+1. Clone the repository
+2. Search for all occurrences of "{flag_key}"
+3. Remove the flag and associated code safely
+4. Run tests to verify nothing breaks
+5. Create a pull request
+
+IMPORTANT: Return structured output in this EXACT JSON format:
+{{
+  "pr_url": "https://github.com/...",
+  "files_modified": ["path/to/file1.py", "path/to/file2.js"],
+  "occurrences_removed": 12,
+  "test_results": "PASSED" or "FAILED" or "SKIPPED",
+  "warnings": ["Any warnings or issues encountered"],
+  "acu_consumed": 450
+}}
+
+If you cannot create a PR, set pr_url to null and explain in warnings.
+"""
+```
+
+---
+
 ## Technology Stack
 
 ### Frontend
@@ -1003,28 +1822,63 @@ def calculate_request_status(sessions):
 - **Styling**: Tailwind CSS
 - **UI Components**: shadcn/ui (pre-installed)
 - **Icons**: Lucide React
-- **HTTP Client**: Fetch API / Axios
+- **HTTP Client**: Fetch API (native) with EventSource for SSE
 - **State Management**: React hooks (useState, useEffect)
 - **Routing**: React Router (if needed for multi-page)
 
 ### Backend
 - **Framework**: FastAPI (Python 3.8+)
 - **Database**: SQLite (in-memory for proof of concept)
-- **ORM**: SQLAlchemy (optional, can use raw SQL)
+  - **Migration Path**: PostgreSQL for production (Phase 3+)
+- **ORM**: SQLAlchemy with async support
 - **API Client**: devin_api_client.py (from Phase 1)
-- **Validation**: Pydantic models
+- **Validation**: Pydantic models with custom validators
 - **CORS**: Enabled for local development
+- **Rate Limiting**: slowapi
+- **SSE**: sse-starlette
+- **Background Tasks**: asyncio + FastAPI BackgroundTasks
 
 ### Development Tools
-- **Backend Server**: `poetry run fastapi dev app/main.py`
+- **Backend Server**: `uvicorn app.main:app --reload`
 - **Frontend Server**: `npm run dev` (Vite)
-- **Testing**: pytest (backend), Jest/Vitest (frontend)
+- **Testing**: pytest (backend), Vitest (frontend)
 - **Linting**: ruff (Python), ESLint (TypeScript)
+- **Type Checking**: mypy (Python), tsc (TypeScript)
 
 ### Deployment
-- **Backend**: Deploy via `deploy` tool (FastAPI to Fly.io)
-- **Frontend**: Deploy via `deploy` tool (static site)
-- **Environment Variables**: .env files for configuration
+- **Backend**: Docker container on Fly.io/Railway/Render
+- **Frontend**: Static hosting on Vercel/Netlify
+- **Environment Variables**: .env files for local, secrets manager for production
+- **Database**: SQLite file volume (Phase 2), PostgreSQL (Phase 3+)
+
+### Dependencies
+```bash
+# Backend requirements.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+pydantic==2.5.0
+slowapi==0.1.9
+sse-starlette==1.8.2
+requests==2.31.0
+python-dotenv==1.0.0
+
+# Frontend package.json
+{
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "typescript": "^5.2.0",
+    "vite": "^5.0.0",
+    "tailwindcss": "^3.3.0",
+    "eslint": "^8.54.0"
+  }
+}
+```
 
 ---
 
