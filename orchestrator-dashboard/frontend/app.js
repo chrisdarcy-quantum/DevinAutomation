@@ -275,18 +275,73 @@ function renderRequestCard(request) {
                         <span class="ml-1">${session.acu_consumed}</span>
                       </div>
                     ` : ''}
-                    ${session.pr_url ? `
+                    ${session.pr_url || session.structured_output?.pr_url ? `
                       <div class="col-span-2">
                         <span class="text-gray-500">PR:</span>
-                        <a href="${session.pr_url}" target="_blank" class="ml-1 text-blue-600 hover:underline break-all">
-                          ${session.pr_url}
+                        <a href="${session.pr_url || session.structured_output?.pr_url}" target="_blank" class="ml-1 text-blue-600 hover:underline break-all">
+                          ${session.pr_url || session.structured_output?.pr_url}
                         </a>
+                      </div>
+                    ` : session.structured_output?.pr_url === null && session.structured_output?.warnings?.length > 0 ? `
+                      <div class="col-span-2 text-orange-600">
+                        <span class="text-gray-500">PR:</span>
+                        <span class="ml-1">No PR created (see warnings below)</span>
                       </div>
                     ` : ''}
                   </div>
                   ${session.error_message ? `
                     <div class="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">
                       ${session.error_message}
+                    </div>
+                  ` : ''}
+                  ${session.structured_output ? `
+                    <div class="mt-2 pt-2 border-t border-gray-300">
+                      ${session.structured_output.warnings?.length > 0 ? `
+                        <div class="mb-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
+                          <div class="font-semibold text-yellow-800 mb-1">⚠️ Warnings:</div>
+                          <ul class="list-disc list-inside text-yellow-800 space-y-1">
+                            ${session.structured_output.warnings.map(w => `<li>${w}</li>`).join('')}
+                          </ul>
+                        </div>
+                      ` : ''}
+                      ${session.structured_output.references_found_initially !== undefined || session.structured_output.references_removed !== undefined || session.structured_output.references_remaining !== undefined ? `
+                        <div class="grid grid-cols-3 gap-2 text-xs mb-2">
+                          ${session.structured_output.references_found_initially !== undefined ? `
+                            <div>
+                              <span class="text-gray-500">Found:</span>
+                              <span class="ml-1">${session.structured_output.references_found_initially}</span>
+                            </div>
+                          ` : ''}
+                          ${session.structured_output.references_removed !== undefined ? `
+                            <div>
+                              <span class="text-gray-500">Removed:</span>
+                              <span class="ml-1">${session.structured_output.references_removed}</span>
+                            </div>
+                          ` : ''}
+                          ${session.structured_output.references_remaining !== undefined ? `
+                            <div class="${session.structured_output.references_remaining > 0 ? 'text-orange-600 font-semibold' : ''}">
+                              <span class="text-gray-500">Remaining:</span>
+                              <span class="ml-1">${session.structured_output.references_remaining}</span>
+                            </div>
+                          ` : ''}
+                        </div>
+                      ` : ''}
+                      ${session.structured_output.test_command_run || session.structured_output.test_results ? `
+                        <div class="text-xs mb-2">
+                          ${session.structured_output.test_command_run ? `
+                            <div>
+                              <span class="text-gray-500">Test command:</span>
+                              <code class="ml-1 bg-gray-100 px-1 rounded">${session.structured_output.test_command_run}</code>
+                            </div>
+                          ` : ''}
+                          ${session.structured_output.test_results ? `
+                            <div>
+                              <span class="text-gray-500">Test results:</span>
+                              <span class="ml-1">${session.structured_output.test_results}</span>
+                            </div>
+                          ` : ''}
+                        </div>
+                      ` : ''}
                     </div>
                   ` : ''}
                 </div>

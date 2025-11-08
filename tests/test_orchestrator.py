@@ -700,10 +700,11 @@ class TestSessionQueue(unittest.TestCase):
         
         self.assertNotIn('"acu_consumed": 450', prompt)
         self.assertNotIn('"occurrences_removed": 12', prompt)
+        self.assertNotIn('"references_removed": 12', prompt)
         
         self.assertIn("structured output", prompt.lower())
         self.assertIn("acu_consumed", prompt)
-        self.assertIn("occurrences_removed", prompt)
+        self.assertIn("references_removed", prompt)
     
     def test_get_active_count(self):
         """Test counting active sessions."""
