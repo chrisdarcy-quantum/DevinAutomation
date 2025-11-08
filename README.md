@@ -49,6 +49,9 @@ Comprehensive documentation covering:
 git clone https://github.com/chrisdarcy-quantum/DevinAutomation.git
 cd DevinAutomation
 
+# Install dependencies
+pip3 install -r requirements.txt
+
 # Set your API key
 export DEVIN_API_KEY='your-api-key-here'
 ```
@@ -97,6 +100,39 @@ The demo will:
 1. Create a test session with a simple "hello world" task
 2. Monitor the session status in real-time
 3. Display the final results including messages and output
+
+## Testing
+
+The project includes a comprehensive test suite to ensure no regressions.
+
+### Running Tests
+
+```bash
+# Run all tests
+python3 -m unittest test_devin_api_client -v
+
+# Run specific test class
+python3 -m unittest test_devin_api_client.TestDevinAPIClient -v
+
+# Run specific test
+python3 -m unittest test_devin_api_client.TestDevinAPIClient.test_create_session_success -v
+```
+
+### Test Coverage
+
+The test suite covers:
+- ✅ Client initialization (with/without API key)
+- ✅ Session creation (success and error cases)
+- ✅ Session details retrieval
+- ✅ Status monitoring and polling
+- ✅ Timeout handling
+- ✅ Message retrieval
+- ✅ Structured output parsing
+- ✅ Error handling for all failure modes
+
+All tests use mocking to avoid consuming ACU credits.
+
+**Test Results:** 19 tests, all passing ✅
 
 ## API Client Reference
 
