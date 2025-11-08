@@ -159,6 +159,50 @@ def init_db():
             except Exception as e:
                 if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
                     logger.warning(f"Could not add {column_name} column (may already exist): {e}")
+        
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("PRAGMA table_info(devin_sessions)")).fetchall()
+                removal_request_id_col = next((col for col in result if col[1] == 'removal_request_id'), None)
+                
+                if removal_request_id_col and removal_request_id_col[3] == 1:
+                    logger.info("Migrating devin_sessions table to make removal_request_id nullable")
+                    
+                    conn.execute(text("PRAGMA foreign_keys=OFF"))
+                    conn.execute(text("""
+                        CREATE TABLE devin_sessions_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            removal_request_id INTEGER,
+                            repository TEXT NOT NULL,
+                            devin_session_id TEXT,
+                            devin_session_url TEXT,
+                            status TEXT NOT NULL DEFAULT 'pending',
+                            pr_url TEXT,
+                            structured_output TEXT,
+                            started_at DATETIME,
+                            completed_at DATETIME,
+                            error_message TEXT,
+                            max_acu_limit INTEGER DEFAULT 500,
+                            acu_consumed INTEGER,
+                            FOREIGN KEY (removal_request_id) REFERENCES removal_requests(id) ON DELETE SET NULL
+                        )
+                    """))
+                    conn.execute(text("""
+                        INSERT INTO devin_sessions_new 
+                        SELECT * FROM devin_sessions
+                    """))
+                    conn.execute(text("DROP TABLE devin_sessions"))
+                    conn.execute(text("ALTER TABLE devin_sessions_new RENAME TO devin_sessions"))
+                    conn.execute(text("CREATE INDEX ix_devin_sessions_removal_request_id ON devin_sessions(removal_request_id)"))
+                    conn.execute(text("CREATE INDEX ix_devin_sessions_devin_session_id ON devin_sessions(devin_session_id)"))
+                    conn.execute(text("CREATE INDEX ix_devin_sessions_status ON devin_sessions(status)"))
+                    conn.execute(text("PRAGMA foreign_keys=ON"))
+                    conn.commit()
+                    logger.info("Successfully migrated devin_sessions table")
+        except Exception as e:
+            logger.warning(f"Migration for devin_sessions.removal_request_id failed: {e}")
+    
+    logger.info("Database initialized")
 
 
 def get_db():
@@ -1436,14 +1480,15 @@ async def list_flags(
 async def scan_repository(id: int, db: Session = Depends(get_db)):
     """Trigger a flag discovery scan for a repository."""
     try:
+        if devin_client is None:
+            raise HTTPException(status_code=503, detail="Devin services not initialized - DEVIN_API_KEY may be missing")
+        
         repository = db.query(Repository).filter_by(id=id).first()
         
         if not repository:
             raise HTTPException(status_code=404, detail="Repository not found")
         
         if session_queue is None:
-            if devin_client is None:
-                raise HTTPException(status_code=503, detail="Devin services not initialized")
             prompt = SessionQueue(devin_client).build_discovery_prompt(
                 repository=repository.url,
                 github_token=repository.github_token
