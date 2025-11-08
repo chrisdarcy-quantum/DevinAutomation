@@ -7,12 +7,12 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
@@ -53,6 +53,7 @@ class RemovalRequest(Base):
     flag_key = Column(String, nullable=False, index=True)
     repositories = Column(Text, nullable=False)  # JSON array of repository URLs
     feature_flag_provider = Column(String, nullable=True)
+    preserve_mode = Column(String, nullable=False, default="enabled")
     status = Column(String, nullable=False, default="queued", index=True)
     created_by = Column(String, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -104,6 +105,18 @@ class SessionLog(Base):
 def init_db():
     """Initialize the database by creating all tables."""
     Base.metadata.create_all(bind=engine)
+    
+    if "sqlite" in DATABASE_URL:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE removal_requests ADD COLUMN preserve_mode TEXT DEFAULT 'enabled' NOT NULL"))
+                conn.commit()
+                logger.info("Added preserve_mode column to removal_requests table")
+        except Exception as e:
+            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Could not add preserve_mode column (may already exist): {e}")
 
 
 def get_db():
@@ -121,6 +134,7 @@ class CreateRemovalRequest(BaseModel):
     flag_key: str = Field(..., min_length=1, description="Feature flag key to remove")
     repositories: List[str] = Field(..., min_items=1, max_items=5, description="List of repository URLs")
     feature_flag_provider: Optional[str] = Field(None, description="Feature flag provider name")
+    preserve_mode: Literal['enabled', 'disabled'] = Field('enabled', description="Which code path to preserve")
     created_by: str = Field(..., min_length=1, description="User email or identifier")
     
     @validator('repositories')
@@ -171,6 +185,7 @@ class RemovalRequestResponse(BaseModel):
     flag_key: str
     repositories: List[str]
     feature_flag_provider: Optional[str]
+    preserve_mode: str
     status: str
     created_by: str
     created_at: datetime
@@ -190,6 +205,7 @@ class RemovalRequestListItem(BaseModel):
     flag_key: str
     repositories: List[str]
     feature_flag_provider: Optional[str]
+    preserve_mode: str
     status: str
     created_by: str
     created_at: datetime
@@ -365,10 +381,13 @@ class SessionMonitor:
                     
                     details = self.devin_client.get_session_details(session.devin_session_id)
                     
+                    old_status = session.status
                     await self.update_session_status(db, session, details)
                     
-                    if session.status != details.status_enum:
+                    if old_status != session.status:
                         await self.log_status_change(db, session, details)
+                    
+                    await self.update_removal_request_status(db, session.removal_request_id)
                     
                     if details.status_enum in ['finished', 'expired']:
                         await self.handle_completion(db, session, details)
@@ -388,7 +407,9 @@ class SessionMonitor:
     
     async def update_session_status(self, db: Session, session: DevinSession, details):
         """Update session status in database."""
-        session.status = details.status_enum
+        status = details.status_enum or details.status
+        if status:
+            session.status = status.lower() if isinstance(status, str) else status
         
         if details.pull_request:
             session.pr_url = details.pull_request.get('url')
@@ -397,7 +418,7 @@ class SessionMonitor:
             session.structured_output = json.dumps(details.structured_output)
             
             if isinstance(details.structured_output, dict):
-                acu = details.structured_output.get('acu_consumed')
+                acu = self._extract_acu_from_output(details.structured_output)
                 if acu is not None:
                     session.acu_consumed = acu
         
@@ -405,6 +426,29 @@ class SessionMonitor:
             session.completed_at = datetime.utcnow()
         
         db.add(session)
+    
+    def _extract_acu_from_output(self, output: Dict[str, Any]) -> Optional[int]:
+        """Extract ACU consumed from structured output, trying multiple common locations."""
+        if not isinstance(output, dict):
+            return None
+        
+        acu_keys = ['acu_consumed', 'acu', 'agent_credits', 'credits']
+        for key in acu_keys:
+            if key in output and output[key] is not None:
+                try:
+                    return int(output[key])
+                except (ValueError, TypeError):
+                    continue
+        
+        if 'usage' in output and isinstance(output['usage'], dict):
+            for key in acu_keys:
+                if key in output['usage'] and output['usage'][key] is not None:
+                    try:
+                        return int(output['usage'][key])
+                    except (ValueError, TypeError):
+                        continue
+        
+        return None
     
     async def log_status_change(self, db: Session, session: DevinSession, details):
         """Log status change event."""
@@ -485,7 +529,7 @@ class SessionMonitor:
                 removal_request.status = 'failed'
             else:
                 removal_request.status = 'completed'
-        elif any(s.status in ['working', 'blocked'] for s in sessions):
+        elif any(s.status in ['claimed', 'working', 'blocked'] for s in sessions):
             removal_request.status = 'in_progress'
         else:
             removal_request.status = 'queued'
@@ -548,7 +592,8 @@ class SessionQueue:
             prompt = self.build_removal_prompt(
                 flag_key=removal_request.flag_key,
                 repository=session.repository,
-                provider=removal_request.feature_flag_provider
+                provider=removal_request.feature_flag_provider,
+                preserve_mode=removal_request.preserve_mode
             )
             
             logger.info(f"Creating Devin session for removal request {removal_request.id}, repository {session.repository}")
@@ -556,7 +601,7 @@ class SessionQueue:
             devin_session = self.devin_client.create_session(
                 prompt=prompt,
                 title=f"Remove flag: {removal_request.flag_key}",
-                tags=["flag-removal", removal_request.flag_key],
+                tags=["flag-removal", removal_request.flag_key, f"preserve:{removal_request.preserve_mode}"],
                 idempotent=True
             )
             
@@ -577,6 +622,12 @@ class SessionQueue:
             
             logger.info(f"Started session {session.id}: {devin_session.session_id}")
             
+            removal_request = session.removal_request
+            if removal_request.status == 'queued':
+                removal_request.status = 'in_progress'
+                removal_request.updated_at = datetime.utcnow()
+                db.add(removal_request)
+            
         except Exception as e:
             logger.error(f"Failed to start session {session.id}: {e}", exc_info=True)
             session.status = 'failed'
@@ -592,8 +643,10 @@ class SessionQueue:
             )
             db.add(log_entry)
     
-    def build_removal_prompt(self, flag_key: str, repository: str, provider: Optional[str]) -> str:
+    def build_removal_prompt(self, flag_key: str, repository: str, provider: Optional[str], preserve_mode: str = 'enabled') -> str:
         """Build the prompt for Devin to remove a feature flag."""
+        preserve_instruction = f'Preserve the "{preserve_mode}" code path and remove the "{("disabled" if preserve_mode == "enabled" else "enabled")}" code path.'
+        
         prompt = f"""Task: Remove feature flag from codebase
 
 Flag Key: {flag_key}
@@ -613,8 +666,7 @@ Instructions:
 
 Important:
 - Do NOT remove code that is still needed
-- Preserve the "enabled" code path
-- Remove the "disabled" code path
+- {preserve_instruction}
 - Run all tests before creating PR
 - If tests fail, investigate and fix
 - If you need clarification, ask before proceeding
@@ -759,6 +811,7 @@ async def create_removal(
             flag_key=body.flag_key,
             repositories=json.dumps(body.repositories),
             feature_flag_provider=body.feature_flag_provider,
+            preserve_mode=body.preserve_mode,
             status='queued',
             created_by=body.created_by,
             created_at=datetime.utcnow(),
@@ -828,6 +881,7 @@ async def list_removals(
                 flag_key=req.flag_key,
                 repositories=json.loads(req.repositories),
                 feature_flag_provider=req.feature_flag_provider,
+                preserve_mode=req.preserve_mode,
                 status=req.status,
                 created_by=req.created_by,
                 created_at=req.created_at,
@@ -1022,6 +1076,7 @@ def _build_removal_response(removal_request: RemovalRequest) -> RemovalRequestRe
         flag_key=removal_request.flag_key,
         repositories=json.loads(removal_request.repositories),
         feature_flag_provider=removal_request.feature_flag_provider,
+        preserve_mode=removal_request.preserve_mode,
         status=removal_request.status,
         created_by=removal_request.created_by,
         created_at=removal_request.created_at,
