@@ -12,9 +12,7 @@ from sqlalchemy.orm import sessionmaker
 import json
 from datetime import datetime
 
-from app.main import app, _build_removal_response
-from app.database import Base, get_db, RemovalRequest, DevinSession, SessionLog
-from app.devin_api_client import SessionResponse, SessionDetails, SessionStatus
+from app import app, _build_removal_response, Base, get_db, RemovalRequest, DevinSession, SessionLog, DevinSessionResponse, DevinSessionDetails, SessionStatus
 
 
 class TestOrchestratorAPI(unittest.TestCase):
@@ -436,10 +434,10 @@ class TestSessionMonitor(unittest.TestCase):
         Base.metadata.create_all(bind=self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
     
-    @patch('app.services.SessionLocal')
+    @patch('app.SessionLocal')
     def test_monitor_updates_session_status(self, mock_session_local):
         """Test that monitor updates session status from Devin API."""
-        from app.services import SessionMonitor
+        from app import SessionMonitor
         
         mock_client = Mock()
         mock_details = Mock()
@@ -490,7 +488,7 @@ class TestSessionQueue(unittest.TestCase):
     
     def test_build_removal_prompt(self):
         """Test prompt building for Devin."""
-        from app.services import SessionQueue
+        from app import SessionQueue
         
         mock_client = Mock()
         queue = SessionQueue(mock_client)
@@ -508,7 +506,7 @@ class TestSessionQueue(unittest.TestCase):
     
     def test_get_active_count(self):
         """Test counting active sessions."""
-        from app.services import SessionQueue
+        from app import SessionQueue
         
         db = self.SessionLocal()
         
