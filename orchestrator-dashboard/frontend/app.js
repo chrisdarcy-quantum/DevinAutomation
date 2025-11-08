@@ -375,7 +375,7 @@ function renderHistory() {
   return `
     <div class="space-y-6">
       <div class="flex justify-between items-center">
-        <h2 class="text-xl font-semibold text-gray-900">Removal History</h2>
+        <h2 class="text-xl font-semibold text-gray-900">Removed Flags</h2>
         <div class="flex items-center gap-4">
           <select 
             class="select w-48" 
@@ -451,7 +451,7 @@ function renderRequestCard(request) {
               ${request.preserve_mode ? ` • Preserve: ${request.preserve_mode}` : ''}
             </p>
           </div>
-          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayText(request.status)}</span>
+          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayTextWithSpinner(request.status)}</span>
         </div>
         <div class="grid grid-cols-2 gap-4 text-sm mb-4">
           <div>
@@ -779,7 +779,7 @@ function render() {
           Repositories
         </div>
         <div class="tab ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history'); loadRequests();">
-          History
+          Removed Flags
         </div>
       </div>
     </div>
