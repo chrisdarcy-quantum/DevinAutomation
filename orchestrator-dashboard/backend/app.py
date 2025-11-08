@@ -1340,13 +1340,30 @@ async def list_repositories(db: Session = Depends(get_db)):
         results = []
         for repo in repositories:
             flag_count = db.query(DiscoveredFlag).filter_by(repository_id=repo.id).count()
+            
+            current_scan = None
+            active_session = db.query(DevinSession).filter(
+                DevinSession.removal_request_id.is_(None),
+                DevinSession.repository == repo.url,
+                DevinSession.status.notin_(['finished', 'failed', 'expired'])
+            ).order_by(DevinSession.started_at.desc()).first()
+            
+            if active_session:
+                current_scan = {
+                    'status': active_session.status,
+                    'devin_session_id': active_session.devin_session_id,
+                    'devin_session_url': active_session.devin_session_url,
+                    'started_at': active_session.started_at.isoformat() if active_session.started_at else None
+                }
+            
             results.append(RepositoryResponse(
                 id=repo.id,
                 url=repo.url,
                 provider_detected=repo.provider_detected,
                 last_scanned_at=repo.last_scanned_at,
                 created_at=repo.created_at,
-                flag_count=flag_count
+                flag_count=flag_count,
+                current_scan=current_scan
             ))
         
         return results
@@ -1367,13 +1384,29 @@ async def get_repository(id: int, db: Session = Depends(get_db)):
         
         flag_count = db.query(DiscoveredFlag).filter_by(repository_id=repository.id).count()
         
+        current_scan = None
+        active_session = db.query(DevinSession).filter(
+            DevinSession.removal_request_id.is_(None),
+            DevinSession.repository == repository.url,
+            DevinSession.status.notin_(['finished', 'failed', 'expired'])
+        ).order_by(DevinSession.started_at.desc()).first()
+        
+        if active_session:
+            current_scan = {
+                'status': active_session.status,
+                'devin_session_id': active_session.devin_session_id,
+                'devin_session_url': active_session.devin_session_url,
+                'started_at': active_session.started_at.isoformat() if active_session.started_at else None
+            }
+        
         return RepositoryResponse(
             id=repository.id,
             url=repository.url,
             provider_detected=repository.provider_detected,
             last_scanned_at=repository.last_scanned_at,
             created_at=repository.created_at,
-            flag_count=flag_count
+            flag_count=flag_count,
+            current_scan=current_scan
         )
         
     except HTTPException:
