@@ -9,6 +9,7 @@ Single-file FastAPI application with all functionality consolidated.
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
@@ -680,6 +681,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "../frontend-vanilla")
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
 monitor_task = None
 queue_task = None
 devin_client = None
@@ -728,6 +733,15 @@ async def shutdown_event():
 
 # ============================================================================
 # ============================================================================
+
+@app.get("/")
+async def root():
+    """Serve the frontend application."""
+    frontend_path = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.exists(frontend_path):
+        return FileResponse(frontend_path)
+    return {"message": "Frontend not found. API is running at /api/"}
+
 
 @app.get("/healthz")
 async def healthz():
