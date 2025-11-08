@@ -1,7 +1,7 @@
 """
 Comprehensive tests for the Feature Flag Removal Orchestration API.
 
-Tests all API endpoints, database operations, and background services with mocked Devin API.
+Tests all API endpoints, database operations, background services, and response shapes.
 """
 
 import unittest
@@ -11,12 +11,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import json
 from datetime import datetime
+import time
 
-from app import app, _build_removal_response, Base, get_db, RemovalRequest, DevinSession, SessionLog, DevinSessionResponse, DevinSessionDetails, SessionStatus
+from app import (
+    app, _build_removal_response, Base, get_db, 
+    RemovalRequest, DevinSession, SessionLog, 
+    DevinSessionResponse, DevinSessionDetails, SessionStatus,
+    SessionMonitor, SessionQueue
+)
 
 
 class TestOrchestratorAPI(unittest.TestCase):
-    """Test suite for the orchestration API."""
+    """Test suite for the orchestration API endpoints."""
     
     @classmethod
     def setUpClass(cls):
@@ -32,7 +38,6 @@ class TestOrchestratorAPI(unittest.TestCase):
                 db.close()
         
         app.dependency_overrides[get_db] = override_get_db
-        
         cls.client = TestClient(app)
     
     @classmethod
@@ -425,6 +430,167 @@ class TestOrchestratorAPI(unittest.TestCase):
         db.close()
 
 
+class TestResponseShapes(unittest.TestCase):
+    """Test that API response shapes match frontend expectations."""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test client."""
+        cls.engine = create_engine("sqlite:///./test_shapes.db", connect_args={"check_same_thread": False})
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        
+        def override_get_db():
+            db = cls.TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+        
+        app.dependency_overrides[get_db] = override_get_db
+        cls.client = TestClient(app)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test database file."""
+        import os
+        if os.path.exists("./test_shapes.db"):
+            os.remove("./test_shapes.db")
+    
+    def setUp(self):
+        """Create tables and test data before each test."""
+        Base.metadata.create_all(bind=self.engine)
+        
+        time.sleep(0.5)  # Brief pause to avoid rate limiting
+        
+        payload = {
+            "flag_key": "test_flag",
+            "repositories": ["https://github.com/test/repo"],
+            "feature_flag_provider": "TestProvider",
+            "created_by": "test@example.com"
+        }
+        response = self.client.post("/api/removals", json=payload)
+        self.assertEqual(response.status_code, 201)
+        self.test_request_id = response.json()["id"]
+    
+    def tearDown(self):
+        """Drop all tables after each test."""
+        Base.metadata.drop_all(bind=self.engine)
+    
+    def test_list_endpoint_response_shape(self):
+        """Test that GET /api/removals returns correct shape for list items."""
+        response = self.client.get("/api/removals")
+        self.assertEqual(response.status_code, 200)
+        
+        data = response.json()
+        
+        self.assertIn("results", data)
+        self.assertIn("total", data)
+        self.assertIn("limit", data)
+        self.assertIn("offset", data)
+        
+        self.assertIsInstance(data["results"], list)
+        
+        if len(data["results"]) > 0:
+            item = data["results"][0]
+            
+            required_fields = [
+                "id", "flag_key", "repositories", "feature_flag_provider",
+                "status", "created_by", "created_at", "updated_at"
+            ]
+            for field in required_fields:
+                self.assertIn(field, item, f"Missing required field: {field}")
+            
+            self.assertIn("session_count", item)
+            self.assertIn("completed_sessions", item)
+            self.assertIn("failed_sessions", item)
+            
+            self.assertNotIn("sessions", item, "List items should NOT include sessions array")
+            
+            self.assertIsInstance(item["repositories"], list)
+            self.assertIsInstance(item["session_count"], int)
+            self.assertIsInstance(item["completed_sessions"], int)
+            self.assertIsInstance(item["failed_sessions"], int)
+    
+    def test_detail_endpoint_response_shape(self):
+        """Test that GET /api/removals/{id} returns correct shape with sessions."""
+        response = self.client.get(f"/api/removals/{self.test_request_id}")
+        self.assertEqual(response.status_code, 200)
+        
+        data = response.json()
+        
+        required_fields = [
+            "id", "flag_key", "repositories", "feature_flag_provider",
+            "status", "created_by", "created_at", "updated_at",
+            "error_message", "total_acu_consumed"
+        ]
+        for field in required_fields:
+            self.assertIn(field, data, f"Missing required field: {field}")
+        
+        self.assertIn("sessions", data)
+        self.assertIsInstance(data["sessions"], list)
+        
+        if len(data["sessions"]) > 0:
+            session = data["sessions"][0]
+            
+            session_fields = [
+                "id", "repository", "devin_session_id", "devin_session_url",
+                "status", "pr_url", "structured_output", "started_at",
+                "completed_at", "error_message", "acu_consumed"
+            ]
+            for field in session_fields:
+                self.assertIn(field, session, f"Missing session field: {field}")
+            
+            self.assertIn("repository", session)
+            self.assertNotIn("repository_url", session)
+    
+    def test_create_endpoint_response_shape(self):
+        """Test that POST /api/removals returns correct shape with sessions."""
+        payload = {
+            "flag_key": "new_test_flag",
+            "repositories": ["https://github.com/test/repo2"],
+            "feature_flag_provider": "TestProvider",
+            "created_by": "test@example.com"
+        }
+        
+        response = self.client.post("/api/removals", json=payload)
+        self.assertEqual(response.status_code, 201)
+        
+        data = response.json()
+        
+        required_fields = [
+            "id", "flag_key", "repositories", "feature_flag_provider",
+            "status", "created_by", "created_at", "updated_at",
+            "error_message", "total_acu_consumed"
+        ]
+        for field in required_fields:
+            self.assertIn(field, data, f"Missing required field: {field}")
+        
+        self.assertIn("sessions", data)
+        self.assertIsInstance(data["sessions"], list)
+        self.assertEqual(len(data["sessions"]), len(payload["repositories"]))
+        
+        if len(data["sessions"]) > 0:
+            session = data["sessions"][0]
+            self.assertIn("repository", session)
+            self.assertNotIn("repository_url", session)
+            self.assertEqual(session["repository"], payload["repositories"][0])
+    
+    def test_repositories_always_array(self):
+        """Test that repositories field is always an array in all endpoints."""
+        response = self.client.get("/api/removals")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        
+        if len(data["results"]) > 0:
+            for item in data["results"]:
+                self.assertIsInstance(item["repositories"], list)
+        
+        response = self.client.get(f"/api/removals/{self.test_request_id}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsInstance(data["repositories"], list)
+
+
 class TestSessionMonitor(unittest.TestCase):
     """Test suite for SessionMonitor background service."""
     
@@ -437,8 +603,6 @@ class TestSessionMonitor(unittest.TestCase):
     @patch('app.SessionLocal')
     def test_monitor_updates_session_status(self, mock_session_local):
         """Test that monitor updates session status from Devin API."""
-        from app import SessionMonitor
-        
         mock_client = Mock()
         mock_details = Mock()
         mock_details.status_enum = 'working'
@@ -471,7 +635,6 @@ class TestSessionMonitor(unittest.TestCase):
         mock_session_local.return_value = db
         
         monitor = SessionMonitor(mock_client)
-        
         self.assertIsNotNone(monitor)
         
         db.close()
@@ -488,8 +651,6 @@ class TestSessionQueue(unittest.TestCase):
     
     def test_build_removal_prompt(self):
         """Test prompt building for Devin."""
-        from app import SessionQueue
-        
         mock_client = Mock()
         queue = SessionQueue(mock_client)
         
@@ -506,8 +667,6 @@ class TestSessionQueue(unittest.TestCase):
     
     def test_get_active_count(self):
         """Test counting active sessions."""
-        from app import SessionQueue
-        
         db = self.SessionLocal()
         
         req = RemovalRequest(

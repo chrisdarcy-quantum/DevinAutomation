@@ -1,0 +1,21 @@
+{
+  "name": "feature-flag-removal-dashboard",
+  "version": "2.5.0",
+  "description": "Feature Flag Removal Orchestration Dashboard",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  },
+  "keywords": [
+    "feature-flags",
+    "devin-ai",
+    "orchestration"
+  ],
+  "author": "",
+  "license": "MIT"
+}
