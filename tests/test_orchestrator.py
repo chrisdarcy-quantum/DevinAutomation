@@ -87,9 +87,27 @@ class TestOrchestratorAPI(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["flag_key"], "ENABLE_NEW_FEATURE")
         self.assertEqual(data["status"], "queued")
+        self.assertEqual(data["preserve_mode"], "enabled")
         self.assertEqual(len(data["sessions"]), 1)
         self.assertEqual(data["sessions"][0]["status"], "pending")
         self.assertEqual(data["sessions"][0]["repository"], "https://github.com/example/repo1")
+    
+    def test_create_removal_request_with_preserve_mode(self):
+        """Test creating a removal request with preserve_mode set to disabled."""
+        payload = {
+            "flag_key": "ENABLE_NEW_FEATURE",
+            "repositories": ["https://github.com/example/repo1"],
+            "feature_flag_provider": "LaunchDarkly",
+            "preserve_mode": "disabled",
+            "created_by": "test@example.com"
+        }
+        
+        response = self.client.post("/api/removals", json=payload)
+        
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["preserve_mode"], "disabled")
+        self.assertEqual(data["flag_key"], "ENABLE_NEW_FEATURE")
     
     def test_create_removal_request_multiple_repos(self):
         """Test creating a removal request with multiple repositories."""

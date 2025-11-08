@@ -10,7 +10,7 @@ const API_BASE_URL = 'http://localhost:8000';
 const state = {
   view: 'dashboard',
   requests: [],
-  selectedRequest: null,
+  requestDetails: {},
   statusFilter: 'all',
   loading: false,
   eventSource: null
@@ -128,6 +128,16 @@ async function loadRequests() {
     const params = state.statusFilter !== 'all' ? { status: state.statusFilter } : {};
     const response = await api.listRemovals(params);
     setState({ requests: response.results, loading: false });
+    
+    for (const request of response.results) {
+      try {
+        const details = await api.getRemoval(request.id);
+        state.requestDetails[request.id] = details;
+        render();
+      } catch (err) {
+        console.error(`Failed to load details for request ${request.id}:`, err);
+      }
+    }
   } catch (error) {
     showToast(error.message, 'error');
     setState({ requests: [], loading: false });
@@ -174,50 +184,113 @@ function renderDashboard() {
         </div>
       ` : `
         <div class="grid gap-4">
-          ${state.requests.map(request => `
-            <div class="card cursor-pointer" onclick="handleRequestClick(${request.id})">
-              <div class="p-6">
-                <div class="flex justify-between items-start mb-4">
-                  <div>
-                    <h3 class="text-lg font-semibold text-gray-900">${request.flag_key}</h3>
-                    <p class="text-sm text-gray-600 mt-1">
-                      ${Array.isArray(request.repositories) ? request.repositories.length : 0} 
-                      ${(Array.isArray(request.repositories) ? request.repositories.length : 0) === 1 ? 'repository' : 'repositories'}
-                      ${request.feature_flag_provider ? ` • ${request.feature_flag_provider}` : ''}
-                    </p>
-                  </div>
-                  <span class="badge ${getStatusBadgeClass(request.status)}">${request.status}</span>
-                </div>
-                <div class="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span class="text-gray-500">Created by:</span>
-                    <span class="ml-2 font-medium">${request.created_by}</span>
-                  </div>
-                  <div>
-                    <span class="text-gray-500">Created:</span>
-                    <span class="ml-2 font-medium">${formatDate(request.created_at)}</span>
-                  </div>
-                  <div>
-                    <span class="text-gray-500">Sessions:</span>
-                    <span class="ml-2 font-medium">
-                      ${request.completed_sessions ?? 0} / ${request.session_count ?? 0} completed
-                    </span>
-                  </div>
-                  <div>
-                    <span class="text-gray-500">ACU Consumed:</span>
-                    <span class="ml-2 font-medium">${request.total_acu_consumed || 0}</span>
-                  </div>
-                </div>
-                ${request.error_message ? `
-                  <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
-                    <p class="text-sm text-red-800">${request.error_message}</p>
-                  </div>
-                ` : ''}
-              </div>
-            </div>
-          `).join('')}
+          ${state.requests.map(request => renderRequestCard(request)).join('')}
         </div>
       `}
+    </div>
+  `;
+}
+
+function renderRequestCard(request) {
+  const details = state.requestDetails?.[request.id];
+  const sessions = details?.sessions || [];
+  
+  return `
+    <div class="card">
+      <div class="p-6">
+        <div class="flex justify-between items-start mb-4">
+          <div>
+            <h3 class="text-lg font-semibold text-gray-900">${request.flag_key}</h3>
+            <p class="text-sm text-gray-600 mt-1">
+              ${Array.isArray(request.repositories) ? request.repositories.length : 0} 
+              ${(Array.isArray(request.repositories) ? request.repositories.length : 0) === 1 ? 'repository' : 'repositories'}
+              ${request.feature_flag_provider ? ` • ${request.feature_flag_provider}` : ''}
+              ${request.preserve_mode ? ` • Preserve: ${request.preserve_mode}` : ''}
+            </p>
+          </div>
+          <span class="badge ${getStatusBadgeClass(request.status)}">${request.status}</span>
+        </div>
+        <div class="grid grid-cols-2 gap-4 text-sm mb-4">
+          <div>
+            <span class="text-gray-500">Created by:</span>
+            <span class="ml-2 font-medium">${request.created_by}</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Created:</span>
+            <span class="ml-2 font-medium">${formatDate(request.created_at)}</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Sessions:</span>
+            <span class="ml-2 font-medium">
+              ${request.completed_sessions ?? 0} / ${request.session_count ?? 0} completed
+            </span>
+          </div>
+          <div>
+            <span class="text-gray-500">ACU (est.):</span>
+            <span class="ml-2 font-medium">${details?.total_acu_consumed || request.total_acu_consumed || 0}</span>
+          </div>
+        </div>
+        ${request.error_message ? `
+          <div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+            <p class="text-sm text-red-800">${request.error_message}</p>
+          </div>
+        ` : ''}
+        ${sessions.length > 0 ? `
+          <div class="mt-4 pt-4 border-t border-gray-200">
+            <h4 class="text-sm font-semibold text-gray-700 mb-3">Sessions</h4>
+            <div class="space-y-3">
+              ${sessions.map(session => `
+                <div class="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                  <div class="flex justify-between items-start mb-2">
+                    <div class="flex-1">
+                      <p class="text-sm font-medium text-gray-900">${session.repository}</p>
+                      ${session.devin_session_url ? `
+                        <a href="${session.devin_session_url}" target="_blank" class="text-xs text-blue-600 hover:underline">
+                          View Devin Session →
+                        </a>
+                      ` : ''}
+                    </div>
+                    <span class="badge ${getStatusBadgeClass(session.status)} text-xs">${session.status}</span>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2 text-xs">
+                    ${session.started_at ? `
+                      <div>
+                        <span class="text-gray-500">Started:</span>
+                        <span class="ml-1">${formatDate(session.started_at)}</span>
+                      </div>
+                    ` : ''}
+                    ${session.completed_at ? `
+                      <div>
+                        <span class="text-gray-500">Completed:</span>
+                        <span class="ml-1">${formatDate(session.completed_at)}</span>
+                      </div>
+                    ` : ''}
+                    ${session.acu_consumed ? `
+                      <div>
+                        <span class="text-gray-500">ACU:</span>
+                        <span class="ml-1">${session.acu_consumed}</span>
+                      </div>
+                    ` : ''}
+                    ${session.pr_url ? `
+                      <div class="col-span-2">
+                        <span class="text-gray-500">PR:</span>
+                        <a href="${session.pr_url}" target="_blank" class="ml-1 text-blue-600 hover:underline break-all">
+                          ${session.pr_url}
+                        </a>
+                      </div>
+                    ` : ''}
+                  </div>
+                  ${session.error_message ? `
+                    <div class="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">
+                      ${session.error_message}
+                    </div>
+                  ` : ''}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        ` : ''}
+      </div>
     </div>
   `;
 }
@@ -269,6 +342,34 @@ function renderCreateForm() {
           </div>
 
           <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              Code Path to Preserve <span class="text-red-500">*</span>
+            </label>
+            <div class="flex gap-6">
+              <label class="flex items-center cursor-pointer">
+                <input 
+                  type="radio" 
+                  name="preserve_mode" 
+                  value="enabled" 
+                  checked
+                  class="mr-2"
+                />
+                <span class="text-sm text-gray-700">Preserve "enabled" code path</span>
+              </label>
+              <label class="flex items-center cursor-pointer">
+                <input 
+                  type="radio" 
+                  name="preserve_mode" 
+                  value="disabled"
+                  class="mr-2"
+                />
+                <span class="text-sm text-gray-700">Preserve "disabled" code path</span>
+              </label>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">Choose which code path to keep when removing the flag</p>
+          </div>
+
+          <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">
               Created By <span class="text-red-500">*</span>
             </label>
@@ -296,144 +397,6 @@ function renderCreateForm() {
 }
 
 
-async function loadRequestDetail(id) {
-  try {
-    setState({ loading: true });
-    const request = await api.getRemoval(id);
-    setState({ selectedRequest: request, loading: false });
-    
-    api.streamStatus(id, (data) => {
-      setState({ selectedRequest: { ...state.selectedRequest, ...data } });
-    });
-  } catch (error) {
-    showToast(error.message, 'error');
-    setState({ loading: false });
-    navigate('dashboard');
-  }
-}
-
-function renderRequestDetail() {
-  if (!state.selectedRequest) {
-    return '<div class="text-center py-12">Loading...</div>';
-  }
-
-  const request = state.selectedRequest;
-  const sessions = request.sessions || [];
-
-  return `
-    <div class="space-y-6">
-      <div class="flex items-center gap-4">
-        <button class="btn btn-outline" onclick="navigate('dashboard')">
-          <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-          Back to Dashboard
-        </button>
-      </div>
-
-      <div class="card">
-        <div class="p-6">
-          <div class="flex justify-between items-start mb-4">
-            <div>
-              <h2 class="text-2xl font-bold text-gray-900">${request.flag_key}</h2>
-              <p class="text-sm text-gray-600 mt-1">
-                Request #${request.id} • Created by ${request.created_by}
-              </p>
-            </div>
-            <span class="badge ${getStatusBadgeClass(request.status)}">${request.status}</span>
-          </div>
-
-          <div class="grid grid-cols-2 gap-4 text-sm mt-6">
-            <div>
-              <span class="text-gray-500">Created:</span>
-              <span class="ml-2 font-medium">${formatDate(request.created_at)}</span>
-            </div>
-            <div>
-              <span class="text-gray-500">Updated:</span>
-              <span class="ml-2 font-medium">${formatDate(request.updated_at)}</span>
-            </div>
-            <div>
-              <span class="text-gray-500">Provider:</span>
-              <span class="ml-2 font-medium">${request.feature_flag_provider || 'Unknown'}</span>
-            </div>
-            <div>
-              <span class="text-gray-500">Total ACU:</span>
-              <span class="ml-2 font-medium">${request.total_acu_consumed || 0}</span>
-            </div>
-          </div>
-
-          ${request.error_message ? `
-            <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
-              <p class="text-sm text-red-800">${request.error_message}</p>
-            </div>
-          ` : ''}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="p-6">
-          <h3 class="text-lg font-semibold text-gray-900 mb-4">
-            Sessions (${sessions.length})
-          </h3>
-          <div class="space-y-4">
-            ${sessions.length === 0 ? `
-              <p class="text-gray-500 text-center py-8">No sessions found</p>
-            ` : sessions.map(session => `
-              <div class="border border-gray-200 rounded-lg p-4">
-                <div class="flex justify-between items-start mb-3">
-                  <div>
-                    <p class="font-medium text-gray-900">${session.repository}</p>
-                    ${session.devin_session_url ? `
-                      <a href="${session.devin_session_url}" target="_blank" class="text-sm text-blue-600 hover:underline">
-                        View Devin Session →
-                      </a>
-                    ` : ''}
-                  </div>
-                  <span class="badge ${getStatusBadgeClass(session.status)}">${session.status}</span>
-                </div>
-                
-                <div class="grid grid-cols-2 gap-3 text-sm">
-                  ${session.started_at ? `
-                    <div>
-                      <span class="text-gray-500">Started:</span>
-                      <span class="ml-2">${formatDate(session.started_at)}</span>
-                    </div>
-                  ` : ''}
-                  ${session.completed_at ? `
-                    <div>
-                      <span class="text-gray-500">Completed:</span>
-                      <span class="ml-2">${formatDate(session.completed_at)}</span>
-                    </div>
-                  ` : ''}
-                  ${session.acu_consumed ? `
-                    <div>
-                      <span class="text-gray-500">ACU:</span>
-                      <span class="ml-2">${session.acu_consumed}</span>
-                    </div>
-                  ` : ''}
-                  ${session.pr_url ? `
-                    <div class="col-span-2">
-                      <span class="text-gray-500">PR:</span>
-                      <a href="${session.pr_url}" target="_blank" class="ml-2 text-blue-600 hover:underline">
-                        ${session.pr_url}
-                      </a>
-                    </div>
-                  ` : ''}
-                </div>
-
-                ${session.error_message ? `
-                  <div class="mt-3 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-800">
-                    ${session.error_message}
-                  </div>
-                ` : ''}
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-}
 
 
 function handleFilterChange(event) {
@@ -441,10 +404,6 @@ function handleFilterChange(event) {
   loadRequests();
 }
 
-function handleRequestClick(id) {
-  navigate('detail', { selectedRequestId: id });
-  loadRequestDetail(id);
-}
 
 async function handleCreateSubmit(event) {
   event.preventDefault();
@@ -469,6 +428,7 @@ async function handleCreateSubmit(event) {
     flag_key: formData.get('flag_key'),
     repositories: repositories,
     feature_flag_provider: formData.get('feature_flag_provider') || null,
+    preserve_mode: formData.get('preserve_mode') || 'enabled',
     created_by: formData.get('created_by')
   };
 
@@ -508,11 +468,6 @@ function render() {
         <div class="tab ${state.view === 'create' ? 'active' : ''}" onclick="navigate('create')">
           Create Request
         </div>
-        ${state.selectedRequestId ? `
-          <div class="tab ${state.view === 'detail' ? 'active' : ''}" onclick="navigate('detail'); loadRequestDetail(${state.selectedRequestId});">
-            Request Details
-          </div>
-        ` : ''}
       </div>
     </div>
   `;
@@ -522,8 +477,6 @@ function render() {
     content = renderDashboard();
   } else if (state.view === 'create') {
     content = renderCreateForm();
-  } else if (state.view === 'detail') {
-    content = renderRequestDetail();
   }
 
   app.innerHTML = `
