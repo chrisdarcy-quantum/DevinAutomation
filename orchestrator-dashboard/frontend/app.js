@@ -549,24 +549,11 @@ async function handleAddRepository(event) {
 }
 
 async function handleScanRepository(id) {
-  if (state.scanningRepositories.has(id)) {
-    return;
-  }
-  
   try {
-    state.scanningRepositories.add(id);
-    render();
-    
     await api.scanRepository(id);
     showToast('Scan started - this may take a few minutes');
-    
-    setTimeout(() => {
-      state.scanningRepositories.delete(id);
-      render();
-    }, 3000);
+    loadRepositories();
   } catch (error) {
-    state.scanningRepositories.delete(id);
-    render();
     showToast(error.message, 'error');
   }
 }
