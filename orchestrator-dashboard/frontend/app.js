@@ -93,6 +93,10 @@ function getStatusBadgeClass(status) {
   return classes[status] || 'badge-default';
 }
 
+function getStatusDisplayText(status) {
+  return status === 'blocked' ? 'waiting for user input' : status;
+}
+
 function showToast(message, type = 'success') {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
@@ -208,7 +212,7 @@ function renderRequestCard(request) {
               ${request.preserve_mode ? ` • Preserve: ${request.preserve_mode}` : ''}
             </p>
           </div>
-          <span class="badge ${getStatusBadgeClass(request.status)}">${request.status}</span>
+          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayText(request.status)}</span>
         </div>
         <div class="grid grid-cols-2 gap-4 text-sm mb-4">
           <div>
@@ -250,7 +254,7 @@ function renderRequestCard(request) {
                         </a>
                       ` : ''}
                     </div>
-                    <span class="badge ${getStatusBadgeClass(session.status)} text-xs">${session.status}</span>
+                    <span class="badge ${getStatusBadgeClass(session.status)} text-xs">${getStatusDisplayText(session.status)}</span>
                   </div>
                   <div class="grid grid-cols-2 gap-2 text-xs">
                     ${session.started_at ? `

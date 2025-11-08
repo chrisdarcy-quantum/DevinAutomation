@@ -687,6 +687,24 @@ class TestSessionQueue(unittest.TestCase):
         self.assertIn("LaunchDarkly", prompt)
         self.assertIn("structured output", prompt.lower())
     
+    def test_build_removal_prompt_no_hardcoded_values(self):
+        """Test that prompt does not contain hardcoded example values."""
+        mock_client = Mock()
+        queue = SessionQueue(mock_client)
+        
+        prompt = queue.build_removal_prompt(
+            flag_key="TEST_FLAG",
+            repository="https://github.com/test/repo",
+            provider="TestProvider"
+        )
+        
+        self.assertNotIn('"acu_consumed": 450', prompt)
+        self.assertNotIn('"occurrences_removed": 12', prompt)
+        
+        self.assertIn("structured output", prompt.lower())
+        self.assertIn("acu_consumed", prompt)
+        self.assertIn("occurrences_removed", prompt)
+    
     def test_get_active_count(self):
         """Test counting active sessions."""
         db = self.SessionLocal()
