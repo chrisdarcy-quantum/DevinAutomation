@@ -16,7 +16,8 @@ const state = {
   statusFilter: 'all',
   loading: false,
   eventSource: null,
-  scanningRepositories: new Set()
+  repositoryPollTimeout: null,
+  selectedRepository: null
 };
 
 function setState(updates) {
@@ -125,6 +126,14 @@ function getStatusDisplayText(status) {
   return status === 'blocked' ? 'waiting for user input' : status;
 }
 
+function getStatusDisplayTextWithSpinner(status) {
+  const text = getStatusDisplayText(status);
+  if (status === 'in_progress' || status === 'claimed' || status === 'working') {
+    return `<span class="inline-block animate-spin mr-1">⟳</span> ${text}`;
+  }
+  return text;
+}
+
 function showToast(message, type = 'success') {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
@@ -142,6 +151,10 @@ function showToast(message, type = 'success') {
 
 
 function navigate(view, data = {}) {
+  if (view !== 'repositories' && state.repositoryPollTimeout) {
+    clearTimeout(state.repositoryPollTimeout);
+    state.repositoryPollTimeout = null;
+  }
   window.location.hash = view;
   setState({ view, ...data });
 }
@@ -181,6 +194,17 @@ async function loadRepositories() {
     setState({ loading: true });
     const repositories = await api.listRepositories();
     setState({ repositories, loading: false });
+    
+    const hasActiveScans = repositories.some(r => r.current_scan);
+    if (hasActiveScans && state.view === 'repositories') {
+      if (state.repositoryPollTimeout) {
+        clearTimeout(state.repositoryPollTimeout);
+      }
+      state.repositoryPollTimeout = setTimeout(() => loadRepositories(), 5000);
+    } else if (state.repositoryPollTimeout) {
+      clearTimeout(state.repositoryPollTimeout);
+      state.repositoryPollTimeout = null;
+    }
   } catch (error) {
     showToast(error.message, 'error');
     setState({ repositories: [], loading: false });
