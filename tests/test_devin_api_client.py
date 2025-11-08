@@ -11,6 +11,10 @@ import json
 import time
 from datetime import datetime
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 from devin_api_client import (
     DevinAPIClient,
     SessionResponse,
