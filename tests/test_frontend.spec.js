@@ -72,17 +72,14 @@ async function registerApiMocks(page, overrides = {}) {
 }
 
 test.describe('Tab Navigation', () => {
-  test('should navigate between Repositories, Flags, and History tabs', async ({ page }) => {
+  test('should navigate between Repositories and History tabs', async ({ page }) => {
     await registerApiMocks(page);
     await page.goto('/');
     
     await expect(page.getByRole('heading', { name: 'Repositories' })).toBeVisible();
     
-    await page.getByRole('tab', { name: 'Flags' }).click();
-    await expect(page.getByRole('heading', { name: 'Discovered Flags' })).toBeVisible();
-    
     await page.getByRole('tab', { name: 'History' }).click();
-    await expect(page.getByRole('heading', { name: 'Removal Requests' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Removal History' })).toBeVisible();
     
     await page.getByRole('tab', { name: 'Repositories' }).click();
     await expect(page.getByRole('heading', { name: 'Repositories' })).toBeVisible();
@@ -422,7 +419,6 @@ test.describe('Accessibility', () => {
     await page.goto('/');
     
     await expect(page.getByRole('tab', { name: 'Repositories' })).toBeVisible();
-    await expect(page.getByRole('tab', { name: 'Flags' })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'History' })).toBeVisible();
     
     await expect(page.getByRole('button', { name: 'Add Repository' })).toBeVisible();

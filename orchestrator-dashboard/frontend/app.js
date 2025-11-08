@@ -727,9 +727,6 @@ function render() {
         <div class="tab ${state.view === 'repositories' ? 'active' : ''}" onclick="navigate('repositories'); loadRepositories();">
           Repositories
         </div>
-        <div class="tab ${state.view === 'flags' ? 'active' : ''}" onclick="navigate('flags'); loadFlags();">
-          Flags
-        </div>
         <div class="tab ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history'); loadRequests();">
           History
         </div>

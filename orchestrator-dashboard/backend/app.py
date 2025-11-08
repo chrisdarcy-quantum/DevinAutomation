@@ -549,6 +549,11 @@ class SessionMonitor:
         )
         db.add(log_entry)
         
+        if not session.removal_request_id and details.structured_output:
+            if isinstance(details.structured_output, dict) and 'flags' in details.structured_output and 'provider' in details.structured_output:
+                logger.info(f"Detected discovery session completion for {session.repository}")
+                await self.persist_discovery_results(db, session.repository, details.structured_output)
+        
         await self.update_removal_request_status(db, session.removal_request_id)
     
     async def check_timeout(self, db: Session, session: DevinSession):
@@ -591,8 +596,46 @@ class SessionMonitor:
         )
         db.add(log_entry)
     
+    async def persist_discovery_results(self, db: Session, repository_url: str, structured_output: dict):
+        """Persist discovery scan results to database."""
+        try:
+            repository = db.query(Repository).filter_by(url=repository_url).first()
+            if not repository:
+                logger.warning(f"Repository not found for URL: {repository_url}")
+                return
+            
+            provider = structured_output.get('provider') or 'Unknown'
+            repository.provider_detected = provider
+            repository.last_scanned_at = datetime.utcnow()
+            db.add(repository)
+            
+            db.query(DiscoveredFlag).filter_by(repository_id=repository.id).delete()
+            
+            flags = structured_output.get('flags', [])
+            for flag_data in flags:
+                if not isinstance(flag_data, dict):
+                    continue
+                
+                flag = DiscoveredFlag(
+                    repository_id=repository.id,
+                    flag_key=flag_data.get('key', ''),
+                    occurrences=int(flag_data.get('occurrences', 0)),
+                    files=json.dumps(flag_data.get('files', [])),
+                    provider=provider,
+                    last_seen_at=datetime.utcnow()
+                )
+                db.add(flag)
+            
+            logger.info(f"Persisted {len(flags)} flags for repository {repository.id}")
+            
+        except Exception as e:
+            logger.error(f"Error persisting discovery results: {e}", exc_info=True)
+    
     async def update_removal_request_status(self, db: Session, removal_request_id: int):
         """Update removal request status based on session statuses."""
+        if not removal_request_id:
+            return
+        
         removal_request = db.query(RemovalRequest).filter_by(id=removal_request_id).first()
         if not removal_request:
             return
@@ -1422,6 +1465,17 @@ async def scan_repository(id: int, db: Session = Depends(get_db)):
         
         logger.info(f"Created discovery session {devin_session.session_id} for repository {id}")
         
+        session = DevinSession(
+            removal_request_id=None,  # Discovery sessions aren't linked to removal requests
+            repository=repository.url,
+            status='claimed',
+            devin_session_id=devin_session.session_id,
+            devin_session_url=devin_session.url,
+            started_at=datetime.utcnow()
+        )
+        db.add(session)
+        db.commit()
+        
         return {
             "message": "Scan started",
             "repository_id": id,
@@ -1433,6 +1487,7 @@ async def scan_repository(id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"Error starting scan for repository {id}: {e}", exc_info=True)
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
