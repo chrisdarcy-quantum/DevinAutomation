@@ -8,9 +8,11 @@ const API_BASE_URL = 'http://localhost:8000';
 
 
 const state = {
-  view: 'dashboard',
+  view: 'repositories',
   requests: [],
   requestDetails: {},
+  repositories: [],
+  flags: [],
   statusFilter: 'all',
   loading: false,
   eventSource: null
@@ -22,32 +24,57 @@ function setState(updates) {
 }
 
 
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    if (options.errorMessage) throw new Error(options.errorMessage);
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Request failed');
+  }
+  return response.status === 204 ? null : response.json();
+}
+
 const api = {
   async listRemovals(params = {}) {
     const queryString = new URLSearchParams(params).toString();
-    const url = `${API_BASE_URL}/api/removals${queryString ? '?' + queryString : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Failed to load requests');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/removals${queryString ? '?' + queryString : ''}`);
   },
 
   async getRemoval(id) {
-    const response = await fetch(`${API_BASE_URL}/api/removals/${id}`);
-    if (!response.ok) throw new Error('Failed to load request details');
-    return response.json();
+    return fetchJson(`${API_BASE_URL}/api/removals/${id}`);
   },
 
   async createRemoval(data) {
-    const response = await fetch(`${API_BASE_URL}/api/removals`, {
+    return fetchJson(`${API_BASE_URL}/api/removals`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Failed to create request');
-    }
-    return response.json();
+  },
+
+  async listRepositories() {
+    return fetchJson(`${API_BASE_URL}/api/repositories`);
+  },
+
+  async createRepository(data) {
+    return fetchJson(`${API_BASE_URL}/api/repositories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+  },
+
+  async deleteRepository(id) {
+    return fetchJson(`${API_BASE_URL}/api/repositories/${id}`, { method: 'DELETE' });
+  },
+
+  async scanRepository(id) {
+    return fetchJson(`${API_BASE_URL}/api/repositories/${id}/scan`, { method: 'POST' });
+  },
+
+  async listFlags(params = {}) {
+    const queryString = new URLSearchParams(params).toString();
+    return fetchJson(`${API_BASE_URL}/api/flags${queryString ? '?' + queryString : ''}`);
   },
 
   streamStatus(id, onUpdate) {
@@ -119,7 +146,7 @@ function navigate(view, data = {}) {
 }
 
 window.addEventListener('hashchange', () => {
-  const hash = window.location.hash.slice(1) || 'dashboard';
+  const hash = window.location.hash.slice(1) || 'repositories';
   if (hash !== state.view) {
     setState({ view: hash });
   }
@@ -148,12 +175,157 @@ async function loadRequests() {
   }
 }
 
-function renderDashboard() {
+async function loadRepositories() {
+  try {
+    setState({ loading: true });
+    const repositories = await api.listRepositories();
+    setState({ repositories, loading: false });
+  } catch (error) {
+    showToast(error.message, 'error');
+    setState({ repositories: [], loading: false });
+  }
+}
+
+async function loadFlags() {
+  try {
+    setState({ loading: true });
+    const flags = await api.listFlags();
+    setState({ flags, loading: false });
+  } catch (error) {
+    showToast(error.message, 'error');
+    setState({ flags: [], loading: false });
+  }
+}
+
+function renderRepositories() {
+  return `
+    <div class="space-y-6">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-gray-900">Repositories</h2>
+        <button class="btn btn-primary" onclick="showAddRepositoryModal()">
+          Add Repository
+        </button>
+      </div>
+
+      ${state.loading ? `
+        <div class="flex justify-center items-center py-12">
+          <div class="spinner"></div>
+        </div>
+      ` : state.repositories.length === 0 ? `
+        <div class="card">
+          <div class="py-12 text-center">
+            <p class="text-gray-500">No repositories registered</p>
+            <p class="text-sm text-gray-400 mt-2">Add a repository to start discovering flags</p>
+          </div>
+        </div>
+      ` : `
+        <div class="grid gap-4 md:grid-cols-2">
+          ${state.repositories.map(repo => renderRepositoryCard(repo)).join('')}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function renderRepositoryCard(repo) {
+  return `
+    <div class="card">
+      <div class="p-6">
+        <div class="flex justify-between items-start mb-4">
+          <div class="flex-1">
+            <h3 class="text-lg font-semibold text-gray-900 break-all">${repo.url}</h3>
+            <p class="text-sm text-gray-600 mt-1">
+              ${repo.provider_detected ? `Provider: ${repo.provider_detected}` : 'Provider: Not detected'}
+              ${repo.flag_count ? ` • ${repo.flag_count} flags` : ''}
+            </p>
+          </div>
+        </div>
+        <div class="text-sm text-gray-600 mb-4">
+          <div>Created: ${formatDate(repo.created_at)}</div>
+          ${repo.last_scanned_at ? `<div>Last scan: ${formatDate(repo.last_scanned_at)}</div>` : '<div>Not scanned yet</div>'}
+        </div>
+        <div class="flex gap-2">
+          <button class="btn btn-outline btn-sm" onclick="handleScanRepository(${repo.id})">
+            Scan
+          </button>
+          <button class="btn btn-outline btn-sm" onclick="handleViewFlags(${repo.id})">
+            View Flags
+          </button>
+          <button class="btn btn-outline btn-sm text-red-600" onclick="handleDeleteRepository(${repo.id})">
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderFlags() {
+  return `
+    <div class="space-y-6">
+      <div class="flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-gray-900">Discovered Flags</h2>
+        <button class="btn btn-outline" onclick="loadFlags()">
+          Refresh
+        </button>
+      </div>
+
+      ${state.loading ? `
+        <div class="flex justify-center items-center py-12">
+          <div class="spinner"></div>
+        </div>
+      ` : state.flags.length === 0 ? `
+        <div class="card">
+          <div class="py-12 text-center">
+            <p class="text-gray-500">No flags discovered yet</p>
+            <p class="text-sm text-gray-400 mt-2">Scan repositories to discover flags</p>
+          </div>
+        </div>
+      ` : `
+        <div class="card">
+          <div class="overflow-x-auto">
+            <table class="w-full">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Flag Key</th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Repository</th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider</th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Occurrences</th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Seen</th>
+                  <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                ${state.flags.map(flag => `
+                  <tr>
+                    <td class="px-6 py-4 text-sm font-medium text-gray-900">${flag.flag_key}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600 break-all">${flag.repository_url || 'N/A'}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600">${flag.provider || 'Unknown'}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600">${flag.occurrences}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600">${formatDate(flag.last_seen_at)}</td>
+                    <td class="px-6 py-4 text-sm">
+                      <button class="btn btn-outline btn-sm" onclick="handleRemoveFlag(${flag.repository_id}, '${flag.flag_key}', '${flag.provider || ''}')">
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function renderHistory() {
   const filterOptions = ['all', 'queued', 'in_progress', 'completed', 'failed', 'partial'];
   
   return `
     <div class="space-y-6">
       <div class="flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-gray-900">Removal History</h2>
         <div class="flex items-center gap-4">
           <select 
             class="select w-48" 
@@ -166,13 +338,10 @@ function renderDashboard() {
               </option>
             `).join('')}
           </select>
+          <button class="btn btn-outline" onclick="loadRequests()">
+            Refresh
+          </button>
         </div>
-        <button class="btn btn-outline" onclick="loadRequests()">
-          <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          Refresh
-        </button>
       </div>
 
       ${state.loading ? `
@@ -183,7 +352,7 @@ function renderDashboard() {
         <div class="card">
           <div class="py-12 text-center">
             <p class="text-gray-500">No removal requests found</p>
-            <p class="text-sm text-gray-400 mt-2">Create a new request to get started</p>
+            <p class="text-sm text-gray-400 mt-2">Remove a flag to see history</p>
           </div>
         </div>
       ` : `
@@ -355,48 +524,128 @@ function renderRequestCard(request) {
 }
 
 
-function renderCreateForm() {
-  return `
-    <div class="card max-w-2xl mx-auto">
+function showAddRepositoryModal() {
+  const modal = document.createElement('div');
+  modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+  modal.innerHTML = `
+    <div class="card max-w-lg mx-4" onclick="event.stopPropagation()">
       <div class="p-6">
-        <h2 class="text-xl font-semibold text-gray-900 mb-6">Create Removal Request</h2>
-        <form onsubmit="handleCreateSubmit(event)" class="space-y-4">
+        <h2 class="text-xl font-semibold text-gray-900 mb-6">Add Repository</h2>
+        <form onsubmit="handleAddRepository(event)" class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">
-              Flag Key <span class="text-red-500">*</span>
+              Repository URL <span class="text-red-500">*</span>
             </label>
             <input 
               type="text" 
-              name="flag_key" 
+              name="url" 
               class="input" 
-              placeholder="ENABLE_NEW_FEATURE"
+              placeholder="https://github.com/example/repo"
               required
             />
           </div>
 
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">
-              Repositories <span class="text-red-500">*</span>
+              GitHub Token (optional)
             </label>
-            <textarea 
-              name="repositories" 
+            <input 
+              type="password" 
+              name="github_token" 
               class="input" 
-              rows="3"
-              placeholder="https://github.com/example/repo1&#10;https://github.com/example/repo2"
-              required
-            ></textarea>
-            <p class="text-xs text-gray-500 mt-1">One repository URL per line (max 5)</p>
+              placeholder="For private repositories"
+            />
+            <p class="text-xs text-gray-500 mt-1">Only needed for private repositories</p>
           </div>
 
+          <div class="flex gap-3 pt-4">
+            <button type="submit" class="btn btn-primary flex-1">
+              Add & Scan
+            </button>
+            <button type="button" class="btn btn-outline" onclick="this.closest('.fixed').remove()">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+  modal.onclick = () => modal.remove();
+  document.body.appendChild(modal);
+}
+
+async function handleAddRepository(event) {
+  event.preventDefault();
+  const formData = new FormData(event.target);
+  const data = {
+    url: formData.get('url'),
+    github_token: formData.get('github_token') || null
+  };
+
+  try {
+    const repo = await api.createRepository(data);
+    showToast('Repository added successfully');
+    event.target.closest('.fixed').remove();
+    
+    showToast('Starting flag discovery scan...');
+    await api.scanRepository(repo.id);
+    
+    loadRepositories();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function handleScanRepository(id) {
+  try {
+    await api.scanRepository(id);
+    showToast('Scan started - this may take a few minutes');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function handleViewFlags(repositoryId) {
+  try {
+    const flags = await api.listFlags({ repository_id: repositoryId });
+    setState({ flags, view: 'flags' });
+    window.location.hash = 'flags';
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function handleDeleteRepository(id) {
+  if (!confirm('Are you sure you want to delete this repository? All discovered flags will be removed.')) {
+    return;
+  }
+
+  try {
+    await api.deleteRepository(id);
+    showToast('Repository deleted');
+    loadRepositories();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+function handleRemoveFlag(repositoryId, flagKey, provider) {
+  const modal = document.createElement('div');
+  modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+  modal.innerHTML = `
+    <div class="card max-w-lg mx-4" onclick="event.stopPropagation()">
+      <div class="p-6">
+        <h2 class="text-xl font-semibold text-gray-900 mb-6">Remove Flag</h2>
+        <form onsubmit="handleRemoveFlagSubmit(event, ${repositoryId}, '${flagKey}', '${provider}')" class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">
-              Feature Flag Provider
+              Flag Key
             </label>
             <input 
               type="text" 
-              name="feature_flag_provider" 
-              class="input" 
-              placeholder="LaunchDarkly, Unleash, etc."
+              value="${flagKey}" 
+              class="input bg-gray-100" 
+              readonly
             />
           </div>
 
@@ -425,7 +674,6 @@ function renderCreateForm() {
                 <span class="text-sm text-gray-700">Preserve "disabled" code path</span>
               </label>
             </div>
-            <p class="text-xs text-gray-500 mt-1">Choose which code path to keep when removing the flag</p>
           </div>
 
           <div>
@@ -443,9 +691,9 @@ function renderCreateForm() {
 
           <div class="flex gap-3 pt-4">
             <button type="submit" class="btn btn-primary flex-1">
-              Create Request
+              Remove Flag
             </button>
-            <button type="button" class="btn btn-outline" onclick="navigate('dashboard')">
+            <button type="button" class="btn btn-outline" onclick="this.closest('.fixed').remove()">
               Cancel
             </button>
           </div>
@@ -453,6 +701,31 @@ function renderCreateForm() {
       </div>
     </div>
   `;
+  modal.onclick = () => modal.remove();
+  document.body.appendChild(modal);
+}
+
+async function handleRemoveFlagSubmit(event, repositoryId, flagKey, provider) {
+  event.preventDefault();
+  const formData = new FormData(event.target);
+  
+  const data = {
+    flag_key: flagKey,
+    repository_id: repositoryId,
+    feature_flag_provider: provider || null,
+    preserve_mode: formData.get('preserve_mode') || 'enabled',
+    created_by: formData.get('created_by')
+  };
+
+  try {
+    await api.createRemoval(data);
+    showToast('Removal request created successfully');
+    event.target.closest('.fixed').remove();
+    navigate('history');
+    loadRequests();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
 }
 
 
@@ -464,42 +737,6 @@ function handleFilterChange(event) {
 }
 
 
-async function handleCreateSubmit(event) {
-  event.preventDefault();
-  
-  const formData = new FormData(event.target);
-  const repositories = formData.get('repositories')
-    .split('\n')
-    .map(r => r.trim())
-    .filter(r => r.length > 0);
-
-  if (repositories.length === 0) {
-    showToast('Please enter at least one repository', 'error');
-    return;
-  }
-
-  if (repositories.length > 5) {
-    showToast('Maximum 5 repositories per request', 'error');
-    return;
-  }
-
-  const data = {
-    flag_key: formData.get('flag_key'),
-    repositories: repositories,
-    feature_flag_provider: formData.get('feature_flag_provider') || null,
-    preserve_mode: formData.get('preserve_mode') || 'enabled',
-    created_by: formData.get('created_by')
-  };
-
-  try {
-    await api.createRemoval(data);
-    showToast('Removal request created successfully');
-    navigate('dashboard');
-    loadRequests();
-  } catch (error) {
-    showToast(error.message, 'error');
-  }
-}
 
 
 function render() {
@@ -521,21 +758,26 @@ function render() {
   const tabs = `
     <div class="border-b border-gray-200 mb-6">
       <div class="flex gap-4">
-        <div class="tab ${state.view === 'dashboard' ? 'active' : ''}" onclick="navigate('dashboard'); loadRequests();">
-          Dashboard
+        <div class="tab ${state.view === 'repositories' ? 'active' : ''}" onclick="navigate('repositories'); loadRepositories();">
+          Repositories
         </div>
-        <div class="tab ${state.view === 'create' ? 'active' : ''}" onclick="navigate('create')">
-          Create Request
+        <div class="tab ${state.view === 'flags' ? 'active' : ''}" onclick="navigate('flags'); loadFlags();">
+          Flags
+        </div>
+        <div class="tab ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history'); loadRequests();">
+          History
         </div>
       </div>
     </div>
   `;
 
   let content = '';
-  if (state.view === 'dashboard') {
-    content = renderDashboard();
-  } else if (state.view === 'create') {
-    content = renderCreateForm();
+  if (state.view === 'repositories') {
+    content = renderRepositories();
+  } else if (state.view === 'flags') {
+    content = renderFlags();
+  } else if (state.view === 'history') {
+    content = renderHistory();
   }
 
   app.innerHTML = `
@@ -549,10 +791,14 @@ function render() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-  const hash = window.location.hash.slice(1) || 'dashboard';
+  const hash = window.location.hash.slice(1) || 'repositories';
   state.view = hash;
   
-  if (hash === 'dashboard') {
+  if (hash === 'repositories') {
+    loadRepositories();
+  } else if (hash === 'flags') {
+    loadFlags();
+  } else if (hash === 'history') {
     loadRequests();
   }
   

@@ -18,8 +18,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'orchestrator-dashboard', 'backend'))
 
 from app import (
-    app, _build_removal_response, Base, get_db, 
-    RemovalRequest, DevinSession, SessionLog, 
+    app, _build_removal_response, Base, get_db, init_db,
+    RemovalRequest, DevinSession, SessionLog, Repository, DiscoveredFlag,
     DevinSessionResponse, DevinSessionDetails, SessionStatus,
     SessionMonitor, SessionQueue
 )
@@ -745,6 +745,308 @@ class TestSessionQueue(unittest.TestCase):
         self.assertEqual(count, 3)  # Only pending, working, blocked
         
         db.close()
+
+
+class TestRepositoryEndpoints(unittest.TestCase):
+    """Test repository management endpoints."""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test database and client."""
+        cls.engine = create_engine("sqlite:///./test_repositories.db", connect_args={"check_same_thread": False})
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        
+        def override_get_db():
+            db = cls.TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+        
+        app.dependency_overrides[get_db] = override_get_db
+        cls.client = TestClient(app)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test database file."""
+        import os
+        if os.path.exists("./test_repositories.db"):
+            os.remove("./test_repositories.db")
+    
+    def setUp(self):
+        """Create tables and clear database before each test."""
+        Base.metadata.create_all(bind=self.engine)
+        
+        db = self.TestingSessionLocal()
+        try:
+            db.query(DiscoveredFlag).delete()
+            db.query(Repository).delete()
+            db.query(SessionLog).delete()
+            db.query(DevinSession).delete()
+            db.query(RemovalRequest).delete()
+            db.commit()
+        except:
+            db.rollback()
+        finally:
+            db.close()
+    
+    def test_create_repository(self):
+        """Test creating a new repository."""
+        response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo',
+            'github_token': None
+        })
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data['url'], 'https://github.com/test/repo')
+        self.assertIsNone(data['provider_detected'])
+        self.assertIsNone(data['last_scanned_at'])
+        self.assertEqual(data['flag_count'], 0)
+    
+    def test_create_duplicate_repository(self):
+        """Test creating a duplicate repository returns 409."""
+        self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        self.assertEqual(response.status_code, 409)
+    
+    def test_list_repositories(self):
+        """Test listing all repositories."""
+        self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo1'
+        })
+        self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo2'
+        })
+        
+        response = self.client.get('/api/repositories')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 2)
+    
+    def test_get_repository(self):
+        """Test getting a single repository."""
+        create_response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        repo_id = create_response.json()['id']
+        
+        response = self.client.get(f'/api/repositories/{repo_id}')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['url'], 'https://github.com/test/repo')
+    
+    def test_get_nonexistent_repository(self):
+        """Test getting a repository that doesn't exist."""
+        response = self.client.get('/api/repositories/999')
+        self.assertEqual(response.status_code, 404)
+    
+    def test_delete_repository(self):
+        """Test deleting a repository."""
+        create_response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        repo_id = create_response.json()['id']
+        
+        response = self.client.delete(f'/api/repositories/{repo_id}')
+        self.assertEqual(response.status_code, 204)
+        
+        get_response = self.client.get(f'/api/repositories/{repo_id}')
+        self.assertEqual(get_response.status_code, 404)
+    
+    def test_invalid_repository_url(self):
+        """Test creating repository with invalid URL."""
+        response = self.client.post('/api/repositories', json={
+            'url': 'not-a-url'
+        })
+        self.assertEqual(response.status_code, 422)
+
+
+class TestFlagEndpoints(unittest.TestCase):
+    """Test flag discovery and listing endpoints."""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test database and client."""
+        cls.engine = create_engine("sqlite:///./test_flags.db", connect_args={"check_same_thread": False})
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        
+        def override_get_db():
+            db = cls.TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+        
+        app.dependency_overrides[get_db] = override_get_db
+        cls.client = TestClient(app)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test database file."""
+        import os
+        if os.path.exists("./test_flags.db"):
+            os.remove("./test_flags.db")
+    
+    def setUp(self):
+        """Create tables and clear database before each test."""
+        Base.metadata.create_all(bind=self.engine)
+        
+        db = self.TestingSessionLocal()
+        try:
+            db.query(DiscoveredFlag).delete()
+            db.query(Repository).delete()
+            db.query(SessionLog).delete()
+            db.query(DevinSession).delete()
+            db.query(RemovalRequest).delete()
+            db.commit()
+        except:
+            db.rollback()
+        finally:
+            db.close()
+    
+    def test_list_flags_empty(self):
+        """Test listing flags when none exist."""
+        response = self.client.get('/api/flags')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+    
+    def test_get_repository_flags(self):
+        """Test getting flags for a specific repository."""
+        create_response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        repo_id = create_response.json()['id']
+        
+        response = self.client.get(f'/api/repositories/{repo_id}/flags')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+
+class TestRemovalWithRepository(unittest.TestCase):
+    """Test removal requests with repository linkage."""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Set up test database and client."""
+        cls.engine = create_engine("sqlite:///./test_removal_repo.db", connect_args={"check_same_thread": False})
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+        
+        def override_get_db():
+            db = cls.TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+        
+        app.dependency_overrides[get_db] = override_get_db
+        cls.client = TestClient(app)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test database file."""
+        import os
+        if os.path.exists("./test_removal_repo.db"):
+            os.remove("./test_removal_repo.db")
+    
+    def setUp(self):
+        """Create tables and clear database before each test."""
+        Base.metadata.create_all(bind=self.engine)
+        
+        db = self.TestingSessionLocal()
+        try:
+            db.query(DiscoveredFlag).delete()
+            db.query(Repository).delete()
+            db.query(SessionLog).delete()
+            db.query(DevinSession).delete()
+            db.query(RemovalRequest).delete()
+            db.commit()
+        except:
+            db.rollback()
+        finally:
+            db.close()
+    
+    def test_create_removal_with_repository_id(self):
+        """Test creating removal request with repository_id."""
+        repo_response = self.client.post('/api/repositories', json={
+            'url': 'https://github.com/test/repo'
+        })
+        repo_id = repo_response.json()['id']
+        
+        response = self.client.post('/api/removals', json={
+            'flag_key': 'TEST_FLAG',
+            'repository_id': repo_id,
+            'preserve_mode': 'enabled',
+            'created_by': 'test@example.com'
+        })
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data['flag_key'], 'TEST_FLAG')
+    
+    def test_create_removal_with_invalid_repository_id(self):
+        """Test creating removal with non-existent repository_id."""
+        response = self.client.post('/api/removals', json={
+            'flag_key': 'TEST_FLAG',
+            'repository_id': 999,
+            'preserve_mode': 'enabled',
+            'created_by': 'test@example.com'
+        })
+        self.assertEqual(response.status_code, 404)
+    
+    def test_create_removal_legacy_flow(self):
+        """Test creating removal with repositories list (legacy)."""
+        response = self.client.post('/api/removals', json={
+            'flag_key': 'TEST_FLAG',
+            'repositories': ['https://github.com/test/repo'],
+            'preserve_mode': 'enabled',
+            'created_by': 'test@example.com'
+        })
+        self.assertEqual(response.status_code, 201)
+    
+    def test_create_removal_requires_repo_or_list(self):
+        """Test that either repository_id or repositories is required."""
+        response = self.client.post('/api/removals', json={
+            'flag_key': 'TEST_FLAG',
+            'preserve_mode': 'enabled',
+            'created_by': 'test@example.com'
+        })
+        self.assertEqual(response.status_code, 422)
+
+
+class TestDiscoveryPrompt(unittest.TestCase):
+    """Test discovery prompt generation."""
+    
+    def test_build_discovery_prompt(self):
+        """Test that discovery prompt is generated correctly."""
+        queue = SessionQueue(None, None)
+        
+        prompt = queue.build_discovery_prompt(
+            repository='https://github.com/test/repo',
+            github_token=None
+        )
+        
+        self.assertIn('Discover all feature flags', prompt)
+        self.assertIn('LaunchDarkly', prompt)
+        self.assertIn('Statsig', prompt)
+        self.assertIn('Unleash', prompt)
+        self.assertIn('READ-ONLY', prompt)
+        self.assertIn('Do NOT modify any files', prompt)
+        self.assertIn('Do NOT create any PRs', prompt)
+    
+    def test_discovery_prompt_no_hardcoded_values(self):
+        """Test that discovery prompt doesn't contain hardcoded example values."""
+        queue = SessionQueue(None, None)
+        
+        prompt = queue.build_discovery_prompt(
+            repository='https://github.com/test/repo',
+            github_token=None
+        )
+        
+        self.assertNotIn('"occurrences": 12', prompt)
+        self.assertNotIn('"acu_consumed": 450', prompt)
 
 
 if __name__ == '__main__':
