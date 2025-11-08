@@ -1,0 +1,64 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  sessions  RemovalSession[]
+  audits    AuditLog[]
+}
+
+model RemovalSession {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  
+  provider    String   // 'launchdarkly'
+  flagKey     String
+  projectKey  String
+  envKey      String
+  
+  repos       String   // JSON array of repo names
+  scanResults String?  // JSON with matches & confidence
+  patchPlan   String?  // JSON with proposed edits
+  
+  status      String   @default("draft") // draft|scanning|ready|pr_created|failed
+  prUrl       String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId, status])
+  @@index([flagKey])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  
+  action      String   // 'scan'|'create_pr'|'archive_flag'
+  provider    String
+  flagKey     String
+  repos       String   // JSON array
+  
+  success     Boolean
+  errorMsg    String?
+  metadata    String?  // JSON
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([flagKey])
+  @@index([createdAt])
+}
