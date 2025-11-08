@@ -1,0 +1,16 @@
+# DevinAutomation - Financial Management System
+# 
+# This application uses only Python standard library modules.
+# No external dependencies are required.
+# 
+# Minimum Python version: 3.7
+#
+# Standard library modules used:
+# - json
+# - sqlite3
+# - datetime
+# - typing
+# - dataclasses
+# - enum
+# - statistics
+# - re
