@@ -653,31 +653,112 @@ Flag Key: {flag_key}
 Repository: {repository}
 Provider: {provider or 'Unknown'}
 
-Instructions:
+BEFORE YOU START:
 1. Clone the repository
-2. Search for all occurrences of the flag key "{flag_key}"
-3. Analyze each occurrence and determine safe removal strategy
-4. Remove the flag and associated conditional code
-5. Ensure code still compiles and tests pass
-6. Create a pull request with:
-   - Title: "Remove feature flag: {flag_key}"
-   - Description: List of files modified and changes made
-   - Label: "feature-flag-removal"
+2. Search the ENTIRE codebase for ALL variations of this flag:
+   - Exact match: "{flag_key}"
+   - camelCase version (if applicable)
+   - kebab-case version (if applicable)
+   - SCREAMING_SNAKE_CASE version
+   - Partial matches (last 2-3 words of the flag name)
+   
+   Example: For flag "enable_new_checkout", search for:
+   - enable_new_checkout (exact)
+   - enableNewCheckout (camelCase)
+   - enable-new-checkout (kebab-case)
+   - ENABLE_NEW_CHECKOUT (SCREAMING_SNAKE_CASE)
+   - new_checkout (partial)
+
+3. Search in ALL file types across the entire repository (including but not limited to: source code, tests, documentation, config files, CI/CD configs, build files, environment files, etc.)
+4. Use comprehensive search commands like: grep -r, git grep, or IDE-wide search to ensure nothing is missed
+5. Document your initial findings: "Found X total occurrences across Y files"
+
+EDGE CASES TO WATCH FOR:
+- Flag in database migrations (DO NOT remove - note in warnings)
+- Flag in environment variable files (.env, .env.example) - list in warnings for manual review
+- Flag in third-party library code (DO NOT modify - note in warnings)
+- Flag in archived/deprecated code sections - use judgment and note in warnings
+
+REMOVAL STRATEGY:
+1. Determine if this flag ENABLES or DISABLES a feature when set to true
+2. Based on preserve mode "{preserve_mode}":
+   - If "enabled": Keep the code that runs when flag is TRUE, remove the FALSE path
+   - If "disabled": Keep the code that runs when flag is FALSE, remove the TRUE path
+3. NEVER set boolean values to 'undefined'
+   - Use explicit true/false values, OR
+   - Remove the property/variable entirely if it's no longer needed
+4. {preserve_instruction}
+5. Remove the flag check itself along with the unwanted code path
+
+REMOVAL STEPS:
+1. Remove flag definition from feature flag registry/constants
+2. Remove flag from default values/configuration
+3. Remove conditional checks and simplify to single code path
+4. Remove flag references from tests
+5. Remove flag from documentation
+6. Clean up any imports that are no longer needed
+
+VERIFICATION (CRITICAL):
+1. After removal, search the codebase again for "{flag_key}"
+2. Run the project's test suite:
+   - npm test / yarn test (for Node.js)
+   - pytest / python -m pytest (for Python)
+   - ./gradlew test (for Java)
+   - Whatever is appropriate for this repo
+3. Document test results with actual output
+4. If tests fail, investigate and fix. If you cannot fix within 3 attempts, STOP and document:
+   - What tests are failing
+   - Why they're failing
+   - What you tried to fix them
+   - Set pr_url to null and explain in warnings
+5. Count final occurrences - should be ZERO
+
+ROLLBACK/STOP CONDITIONS:
+If you realize mid-way that you cannot complete this safely:
+- Document what you've discovered and why it's unsafe
+- List specific concerns or blockers
+- Set pr_url to null
+- Provide detailed explanation in warnings array
+- Do NOT create a partial/incomplete PR
+
+CREATE PULL REQUEST:
+- Title: "[Devin-Automated] Remove feature flag: {flag_key}"
+- Description: Write a comprehensive story of the removal process:
+  1. Initial search results: "Cloned repository {repository}, found X total occurrences across Y files"
+  2. List all file types where flag was found (e.g., "Found in: TypeScript files, test files, JSON configs")
+  3. Partial match handling: If you found variations (camelCase, kebab-case, etc.), list them
+  4. Detailed changes: For each file modified, explain what was replaced (e.g., "In src/utils.ts: Replaced conditional check with '{preserve_mode}' path, removed 3 occurrences")
+  5. Code path decision: "Preserved '{preserve_mode}' code path and removed '{("disabled" if preserve_mode == "enabled" else "enabled")}' path"
+  6. Build/compile verification: "Ran build/compile checks to ensure syntax correctness: [result]"
+  7. Test execution: "Ran test suite: [command] - [results with pass/fail counts]"
+  8. Final verification: "Re-searched codebase for '{flag_key}' - X references remaining (should be 0)"
+  9. Any warnings or concerns that require human review
+- Label: "feature-flag-removal"
+- CRITICAL: Do NOT add any new .txt or .md documentation files to the PR
+- CRITICAL: Do NOT create summary files, changelog files, or documentation updates
+- Only commit actual code changes (source files, tests, configs that existed before)
 
 Important:
 - Do NOT remove code that is still needed
-- {preserve_instruction}
 - Run all tests before creating PR
 - If tests fail, investigate and fix
 - If you need clarification, ask before proceeding
+- If you encounter ambiguity about which code path to preserve, STOP and ask for clarification
+- If you cannot create a PR, set pr_url to null and explain in warnings
+- If references_remaining > 0, list the files in warnings
 
 IMPORTANT: Return structured output as a JSON object with these keys and types:
-- pr_url: string (the GitHub PR URL you created, or null if unable to create)
+- references_found_initially: integer (total occurrences found in initial search)
+- references_removed: integer (count of flag occurrences you removed)
+- references_remaining: integer (should be 0 after complete removal)
 - files_modified: array of strings (paths to files you changed)
-- occurrences_removed: integer (count of flag occurrences you removed)
-- test_results: string (one of: "PASSED", "FAILED", or "SKIPPED")
-- warnings: array of strings (any issues you encountered)
+- pr_url: string (the GitHub PR URL you created, or null if unable to create)
+- test_command_run: string (actual test command executed, or "not run")
+- test_results: string (e.g., "PASSED: 45 tests" or "FAILED: reason" or "SKIPPED")
+- code_path_preserved: string (one of: "enabled" or "disabled")
+- warnings: array of strings (any issues, ambiguities, or items needing manual review)
 - acu_consumed: integer (actual ACU credits used for this session)
+- verification_search_output: string (output from final search command to verify removal)
 
 Populate all values using the actual results of your work. Do not use placeholder or example values.
 """
