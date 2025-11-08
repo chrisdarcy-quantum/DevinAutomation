@@ -7,11 +7,11 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, text, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, model_validator
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from dataclasses import dataclass
@@ -52,6 +52,7 @@ class RemovalRequest(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     flag_key = Column(String, nullable=False, index=True)
     repositories = Column(Text, nullable=False)  # JSON array of repository URLs
+    repository_id = Column(Integer, ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True, index=True)
     feature_flag_provider = Column(String, nullable=True)
     preserve_mode = Column(String, nullable=False, default="enabled")
     status = Column(String, nullable=False, default="queued", index=True)
@@ -61,6 +62,7 @@ class RemovalRequest(Base):
     error_message = Column(Text, nullable=True)
     total_acu_consumed = Column(Integer, default=0)
     
+    repository = relationship("Repository", back_populates="removal_requests")
     sessions = relationship("DevinSession", back_populates="removal_request", cascade="all, delete-orphan")
 
 
@@ -102,6 +104,42 @@ class SessionLog(Base):
     session = relationship("DevinSession", back_populates="logs")
 
 
+class Repository(Base):
+    """Tracks registered repositories for flag discovery and removal."""
+    
+    __tablename__ = "repositories"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    url = Column(String, nullable=False, unique=True, index=True)
+    github_token = Column(String, nullable=True)  # For private repos, never returned in API
+    provider_detected = Column(String, nullable=True)  # LaunchDarkly, Statsig, etc.
+    last_scanned_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    discovered_flags = relationship("DiscoveredFlag", back_populates="repository", cascade="all, delete-orphan")
+    removal_requests = relationship("RemovalRequest", back_populates="repository")
+
+
+class DiscoveredFlag(Base):
+    """Stores flags discovered during repository scans."""
+    
+    __tablename__ = "discovered_flags"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    repository_id = Column(Integer, ForeignKey("repositories.id"), nullable=False, index=True)
+    flag_key = Column(String, nullable=False, index=True)
+    occurrences = Column(Integer, nullable=False, default=0)
+    files = Column(Text, nullable=True)  # JSON array of file paths
+    provider = Column(String, nullable=True)
+    last_seen_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    repository = relationship("Repository", back_populates="discovered_flags")
+    
+    __table_args__ = (
+        UniqueConstraint('repository_id', 'flag_key', name='uix_repo_flag'),
+    )
+
+
 def init_db():
     """Initialize the database by creating all tables."""
     Base.metadata.create_all(bind=engine)
@@ -117,6 +155,17 @@ def init_db():
                 pass
             else:
                 logger.warning(f"Could not add preserve_mode column (may already exist): {e}")
+        
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE removal_requests ADD COLUMN repository_id INTEGER"))
+                conn.commit()
+                logger.info("Added repository_id column to removal_requests table")
+        except Exception as e:
+            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                pass
+            else:
+                logger.warning(f"Could not add repository_id column (may already exist): {e}")
 
 
 def get_db():
@@ -132,24 +181,11 @@ class CreateRemovalRequest(BaseModel):
     """Request body for creating a new removal request."""
     
     flag_key: str = Field(..., min_length=1, description="Feature flag key to remove")
-    repositories: List[str] = Field(..., min_items=1, max_items=5, description="List of repository URLs")
+    repositories: List[str] = Field(default=[], description="List of repository URLs (legacy)")
+    repository_id: Optional[int] = Field(None, description="Repository ID (new flow)")
     feature_flag_provider: Optional[str] = Field(None, description="Feature flag provider name")
     preserve_mode: Literal['enabled', 'disabled'] = Field('enabled', description="Which code path to preserve")
     created_by: str = Field(..., min_length=1, description="User email or identifier")
-    
-    @validator('repositories')
-    def validate_repositories(cls, v):
-        """Validate repository URLs."""
-        if not v:
-            raise ValueError("At least one repository is required")
-        if len(v) > 5:
-            raise ValueError("Maximum 5 repositories per request")
-        
-        for repo in v:
-            if not repo.startswith(('http://', 'https://')):
-                raise ValueError(f"Invalid repository URL: {repo}")
-        
-        return v
     
     @validator('flag_key')
     def validate_flag_key(cls, v):
@@ -157,6 +193,27 @@ class CreateRemovalRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("Flag key cannot be empty")
         return v.strip()
+    
+    @model_validator(mode='after')
+    def validate_repo_source(self):
+        """Validate that either repository_id or repositories is provided."""
+        repository_id = self.repository_id
+        repositories = self.repositories
+        
+        if not repository_id and not repositories:
+            raise ValueError("Either repository_id or repositories list is required")
+        
+        if repository_id and repositories:
+            raise ValueError("Provide either repository_id or repositories list, not both")
+        
+        if repositories and len(repositories) > 5:
+            raise ValueError("Maximum 5 repositories per request")
+        
+        for repo in repositories:
+            if not repo.startswith(('http://', 'https://')):
+                raise ValueError(f"Invalid repository URL: {repo}")
+        
+        return self
 
 
 class SessionResponse(BaseModel):
@@ -246,6 +303,53 @@ class LogsResponse(BaseModel):
     
     removal_request_id: int
     logs: List[SessionLogResponse]
+
+
+class CreateRepository(BaseModel):
+    """Request body for creating a new repository."""
+    
+    url: str = Field(..., min_length=1, description="Repository URL")
+    github_token: Optional[str] = Field(None, description="GitHub token for private repos")
+    
+    @validator('url')
+    def validate_url(cls, v):
+        """Validate repository URL."""
+        if not v or not v.strip():
+            raise ValueError("Repository URL cannot be empty")
+        v = v.strip()
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError(f"Invalid repository URL: {v}")
+        return v
+
+
+class RepositoryResponse(BaseModel):
+    """Response model for a repository."""
+    
+    id: int
+    url: str
+    provider_detected: Optional[str]
+    last_scanned_at: Optional[datetime]
+    created_at: datetime
+    flag_count: int = 0
+    
+    class Config:
+        from_attributes = True
+
+
+class DiscoveredFlagResponse(BaseModel):
+    """Response model for a discovered flag."""
+    
+    id: int
+    repository_id: int
+    flag_key: str
+    occurrences: int
+    files: List[str] = []
+    provider: Optional[str]
+    last_seen_at: datetime
+    repository_url: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
 
 
 class SessionStatus(Enum):
@@ -764,6 +868,83 @@ Populate all values using the actual results of your work. Do not use placeholde
 """
         return prompt
     
+    def build_discovery_prompt(self, repository: str, github_token: Optional[str] = None) -> str:
+        """Build the prompt for Devin to discover feature flags in a repository."""
+        token_instruction = f"\nGitHub Token: {github_token}" if github_token else "\nNote: This is a public repository, no token needed."
+        
+        prompt = f"""Task: Discover all feature flags in codebase
+
+Repository: {repository}{token_instruction}
+
+OBJECTIVE:
+Scan the entire repository to identify ALL feature flags and their usage patterns. This is a READ-ONLY task - do NOT modify any files or create PRs.
+
+STEP 1: DETECT PROVIDER
+Identify which feature flag provider(s) are used by searching for:
+- LaunchDarkly: imports/requires of 'launchdarkly', 'ld-client', configuration files
+- Statsig: imports of 'statsig', configuration files
+- Unleash: imports of 'unleash-client', configuration files
+- Split.io: imports of 'splitio', configuration files
+- Custom: Look for internal flag management systems, environment variables, config files
+
+STEP 2: COMPREHENSIVE FLAG SEARCH
+Search the ENTIRE codebase for flag usage patterns:
+
+For LaunchDarkly:
+- variation(), boolVariation(), stringVariation(), etc.
+- Look for flag keys as strings in these calls
+
+For Statsig:
+- checkGate(), getExperiment(), getConfig()
+- Look for gate/experiment names
+
+For Unleash:
+- isEnabled(), getVariant()
+- Look for toggle names
+
+For Custom/Environment:
+- process.env.FEATURE_*, process.env.ENABLE_*
+- Config object properties
+- Boolean flags in settings files
+
+STEP 3: CATALOG EACH FLAG
+For each unique flag found, record:
+- Flag key/name (exact string)
+- Number of occurrences in codebase
+- List of files where it appears (full paths)
+- Which provider it belongs to
+
+STEP 4: SEARCH COMPREHENSIVELY
+Use multiple search strategies:
+- grep -r for flag provider API calls
+- Search config files (.json, .yaml, .env, .env.example)
+- Search source code (all languages)
+- Search test files
+- Search documentation
+
+IMPORTANT: Return structured output as a JSON object with these keys:
+- provider: string (detected provider: "LaunchDarkly", "Statsig", "Unleash", "Split.io", "Custom", or "Multiple")
+- flags: array of objects, each with:
+  - key: string (flag name/key)
+  - occurrences: integer (total count in codebase)
+  - files: array of strings (file paths where flag appears)
+- total_flags: integer (unique flag count)
+- total_occurrences: integer (sum of all occurrences)
+- warnings: array of strings (any issues or ambiguities encountered)
+- acu_consumed: integer (actual ACU credits used)
+
+CRITICAL INSTRUCTIONS:
+- Do NOT modify any files
+- Do NOT create any PRs
+- Do NOT create any documentation files
+- This is a READ-ONLY discovery task
+- Populate all values using actual search results
+- Do not use placeholder or example values
+- If you cannot determine the provider, set it to "Unknown"
+- If no flags are found, return empty flags array with total_flags: 0
+"""
+        return prompt
+    
     def get_active_count(self, db: Session) -> int:
         """Get count of active Devin sessions."""
         return db.query(DevinSession).filter(
@@ -863,6 +1044,7 @@ async def create_removal(
     Create a new feature flag removal request.
     
     This will create Devin sessions for each repository.
+    Supports both legacy (repositories list) and new (repository_id) flows.
     """
     try:
         active_count = db.query(DevinSession).filter(
@@ -880,16 +1062,30 @@ async def create_removal(
                 }
             )
         
-        if len(body.repositories) > MAX_REPOS_PER_REQUEST:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Maximum {MAX_REPOS_PER_REQUEST} repositories per request"
-            )
+        repos_to_process = []
+        provider = body.feature_flag_provider
+        
+        if body.repository_id:
+            repository = db.query(Repository).filter_by(id=body.repository_id).first()
+            if not repository:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            
+            repos_to_process = [repository.url]
+            if not provider and repository.provider_detected:
+                provider = repository.provider_detected
+        else:
+            if len(body.repositories) > MAX_REPOS_PER_REQUEST:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Maximum {MAX_REPOS_PER_REQUEST} repositories per request"
+                )
+            repos_to_process = body.repositories
         
         removal_request = RemovalRequest(
             flag_key=body.flag_key,
-            repositories=json.dumps(body.repositories),
-            feature_flag_provider=body.feature_flag_provider,
+            repositories=json.dumps(repos_to_process),
+            repository_id=body.repository_id,
+            feature_flag_provider=provider,
             preserve_mode=body.preserve_mode,
             status='queued',
             created_by=body.created_by,
@@ -899,7 +1095,7 @@ async def create_removal(
         db.add(removal_request)
         db.flush()
         
-        for repo in body.repositories:
+        for repo in repos_to_process:
             session = DevinSession(
                 removal_request_id=removal_request.id,
                 repository=repo,
@@ -1031,6 +1227,254 @@ async def get_removal_logs(id: int, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         logger.error(f"Error getting logs for removal request {id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories", response_model=RepositoryResponse, status_code=201)
+async def create_repository(
+    body: CreateRepository,
+    db: Session = Depends(get_db)
+):
+    """Create a new repository and optionally trigger initial scan."""
+    try:
+        existing = db.query(Repository).filter_by(url=body.url).first()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Repository already exists with id {existing.id}"
+            )
+        
+        repository = Repository(
+            url=body.url,
+            github_token=body.github_token,
+            created_at=datetime.utcnow()
+        )
+        db.add(repository)
+        db.commit()
+        db.refresh(repository)
+        
+        logger.info(f"Created repository {repository.id}: {repository.url}")
+        
+        return RepositoryResponse(
+            id=repository.id,
+            url=repository.url,
+            provider_detected=repository.provider_detected,
+            last_scanned_at=repository.last_scanned_at,
+            created_at=repository.created_at,
+            flag_count=0
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating repository: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories", response_model=List[RepositoryResponse])
+async def list_repositories(db: Session = Depends(get_db)):
+    """List all registered repositories with flag counts."""
+    try:
+        repositories = db.query(Repository).order_by(Repository.created_at.desc()).all()
+        
+        results = []
+        for repo in repositories:
+            flag_count = db.query(DiscoveredFlag).filter_by(repository_id=repo.id).count()
+            results.append(RepositoryResponse(
+                id=repo.id,
+                url=repo.url,
+                provider_detected=repo.provider_detected,
+                last_scanned_at=repo.last_scanned_at,
+                created_at=repo.created_at,
+                flag_count=flag_count
+            ))
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error listing repositories: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/{id}", response_model=RepositoryResponse)
+async def get_repository(id: int, db: Session = Depends(get_db)):
+    """Get details of a specific repository."""
+    try:
+        repository = db.query(Repository).filter_by(id=id).first()
+        
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        flag_count = db.query(DiscoveredFlag).filter_by(repository_id=repository.id).count()
+        
+        return RepositoryResponse(
+            id=repository.id,
+            url=repository.url,
+            provider_detected=repository.provider_detected,
+            last_scanned_at=repository.last_scanned_at,
+            created_at=repository.created_at,
+            flag_count=flag_count
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting repository {id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/repositories/{id}", status_code=204)
+async def delete_repository(id: int, db: Session = Depends(get_db)):
+    """Delete a repository and all associated discovered flags."""
+    try:
+        repository = db.query(Repository).filter_by(id=id).first()
+        
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        db.delete(repository)
+        db.commit()
+        
+        logger.info(f"Deleted repository {id}: {repository.url}")
+        
+        return None
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting repository {id}: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/{id}/flags", response_model=List[DiscoveredFlagResponse])
+async def get_repository_flags(id: int, db: Session = Depends(get_db)):
+    """Get all discovered flags for a specific repository."""
+    try:
+        repository = db.query(Repository).filter_by(id=id).first()
+        
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        flags = db.query(DiscoveredFlag).filter_by(repository_id=id).order_by(
+            DiscoveredFlag.last_seen_at.desc()
+        ).all()
+        
+        results = []
+        for flag in flags:
+            files = []
+            if flag.files:
+                try:
+                    files = json.loads(flag.files)
+                except:
+                    pass
+            
+            results.append(DiscoveredFlagResponse(
+                id=flag.id,
+                repository_id=flag.repository_id,
+                flag_key=flag.flag_key,
+                occurrences=flag.occurrences,
+                files=files,
+                provider=flag.provider,
+                last_seen_at=flag.last_seen_at,
+                repository_url=repository.url
+            ))
+        
+        return results
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting flags for repository {id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/flags", response_model=List[DiscoveredFlagResponse])
+async def list_flags(
+    repository_id: Optional[int] = None,
+    provider: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List all discovered flags with optional filters."""
+    try:
+        query = db.query(DiscoveredFlag)
+        
+        if repository_id:
+            query = query.filter(DiscoveredFlag.repository_id == repository_id)
+        
+        if provider:
+            query = query.filter(DiscoveredFlag.provider == provider)
+        
+        flags = query.order_by(DiscoveredFlag.last_seen_at.desc()).all()
+        
+        results = []
+        for flag in flags:
+            files = []
+            if flag.files:
+                try:
+                    files = json.loads(flag.files)
+                except:
+                    pass
+            
+            repository_url = None
+            if flag.repository:
+                repository_url = flag.repository.url
+            
+            results.append(DiscoveredFlagResponse(
+                id=flag.id,
+                repository_id=flag.repository_id,
+                flag_key=flag.flag_key,
+                occurrences=flag.occurrences,
+                files=files,
+                provider=flag.provider,
+                last_seen_at=flag.last_seen_at,
+                repository_url=repository_url
+            ))
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error listing flags: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{id}/scan", status_code=202)
+async def scan_repository(id: int, db: Session = Depends(get_db)):
+    """Trigger a flag discovery scan for a repository."""
+    try:
+        repository = db.query(Repository).filter_by(id=id).first()
+        
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        prompt = session_queue.build_discovery_prompt(
+            repository=repository.url,
+            github_token=repository.github_token
+        )
+        
+        logger.info(f"Starting discovery scan for repository {id}: {repository.url}")
+        
+        devin_session = devin_client.create_session(
+            prompt=prompt,
+            title=f"Discover flags: {repository.url}",
+            tags=["discovery", f"repo:{id}"],
+            idempotent=True
+        )
+        
+        logger.info(f"Created discovery session {devin_session.session_id} for repository {id}")
+        
+        return {
+            "message": "Scan started",
+            "repository_id": id,
+            "devin_session_id": devin_session.session_id,
+            "devin_session_url": devin_session.url
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting scan for repository {id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
