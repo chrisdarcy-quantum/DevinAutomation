@@ -1019,6 +1019,15 @@ class TestRemovalWithRepository(unittest.TestCase):
 class TestDiscoveryPrompt(unittest.TestCase):
     """Test discovery prompt generation."""
     
+    def setUp(self):
+        """Set up test database."""
+        self.db = SessionLocal()
+        self.mock_client = MagicMock()
+    
+    def tearDown(self):
+        """Clean up test database."""
+        self.db.close()
+    
     def test_build_discovery_prompt(self):
         """Test that discovery prompt is generated correctly."""
         queue = SessionQueue(None, None)
