@@ -229,7 +229,27 @@ function renderRepositories() {
 }
 
 function renderRepositoryCard(repo) {
-  const isScanning = state.scanningRepositories.has(repo.id);
+  const isScanning = repo.current_scan ? true : false;
+  const scanButtonText = isScanning ? '<span class="inline-block animate-spin mr-1">⟳</span> Scanning...' : 'Scan';
+  
+  let scanStatus = 'Not scanned';
+  let scanStatusBadge = '';
+  let devinLink = '';
+  
+  if (repo.current_scan) {
+    const statusText = getStatusDisplayText(repo.current_scan.status);
+    scanStatus = `Scanning: ${statusText}`;
+    scanStatusBadge = `<span class="badge ${getStatusBadgeClass(repo.current_scan.status)} text-xs ml-2">${statusText}</span>`;
+    if (repo.current_scan.devin_session_url) {
+      devinLink = `<div class="mt-2"><a href="${repo.current_scan.devin_session_url}" target="_blank" class="text-xs text-blue-600 hover:underline">Open Devin Session →</a></div>`;
+    }
+  } else if (repo.last_scanned_at) {
+    if (repo.flag_count === 0) {
+      scanStatus = 'Scanned - no flags found';
+    } else {
+      scanStatus = formatDate(repo.last_scanned_at);
+    }
+  }
   
   return `
     <div class="card">
@@ -243,17 +263,18 @@ function renderRepositoryCard(repo) {
             </p>
           </div>
         </div>
-        <div class="text-sm text-gray-600 mb-4">
+        <div class="text-sm text-gray-600 mb-2">
           <div>Created: ${formatDate(repo.created_at)}</div>
-          ${repo.last_scanned_at ? `<div>Last scan: ${formatDate(repo.last_scanned_at)}</div>` : '<div>Not scanned yet</div>'}
+          <div class="flex items-center">Last scan: ${scanStatus}${scanStatusBadge}</div>
         </div>
-        <div class="flex gap-2">
+        ${devinLink}
+        <div class="flex gap-2 mt-4">
           <button 
             class="btn btn-outline btn-sm ${isScanning ? 'opacity-50 cursor-not-allowed' : ''}" 
             onclick="handleScanRepository(${repo.id})"
             ${isScanning ? 'disabled' : ''}
           >
-            ${isScanning ? '<span class="inline-block animate-spin mr-1">⟳</span> Scanning...' : 'Scan'}
+            ${scanButtonText}
           </button>
           <button class="btn btn-outline btn-sm" onclick="handleViewFlags(${repo.id})">
             View Flags
@@ -268,10 +289,19 @@ function renderRepositoryCard(repo) {
 }
 
 function renderFlags() {
+  const repositoryName = state.selectedRepository ? state.selectedRepository.url : 'All Repositories';
+  const scanStatus = state.selectedRepository && state.selectedRepository.last_scanned_at && state.flags.length === 0 
+    ? '<p class="text-sm text-gray-500 mt-1">Scanned - no flags found</p>' 
+    : '';
+  
   return `
     <div class="space-y-6">
       <div class="flex justify-between items-center">
-        <h2 class="text-xl font-semibold text-gray-900">Discovered Flags</h2>
+        <div>
+          <h2 class="text-xl font-semibold text-gray-900">Discovered Flags</h2>
+          <p class="text-sm text-gray-600 mt-1">Repository: ${repositoryName}</p>
+          ${scanStatus}
+        </div>
         <button class="btn btn-outline" onclick="loadFlags()">
           Refresh
         </button>
@@ -285,7 +315,7 @@ function renderFlags() {
         <div class="card">
           <div class="py-12 text-center">
             <p class="text-gray-500">No flags discovered yet</p>
-            <p class="text-sm text-gray-400 mt-2">Scan repositories to discover flags</p>
+            <p class="text-sm text-gray-400 mt-2">${state.selectedRepository ? 'This repository has no feature flags' : 'Scan repositories to discover flags'}</p>
           </div>
         </div>
       ` : `
@@ -329,10 +359,23 @@ function renderFlags() {
 function renderHistory() {
   const filterOptions = ['all', 'queued', 'in_progress', 'completed', 'failed', 'partial'];
   
+  const filteredRequests = state.statusFilter === 'all' 
+    ? state.requests 
+    : state.requests.filter(r => r.status === state.statusFilter);
+  
+  const requestsByRepo = {};
+  filteredRequests.forEach(request => {
+    const repoId = request.repository_id || 'legacy';
+    if (!requestsByRepo[repoId]) {
+      requestsByRepo[repoId] = [];
+    }
+    requestsByRepo[repoId].push(request);
+  });
+  
   return `
     <div class="space-y-6">
       <div class="flex justify-between items-center">
-        <h2 class="text-xl font-semibold text-gray-900">Removal History</h2>
+        <h2 class="text-xl font-semibold text-gray-900">Removed Flags</h2>
         <div class="flex items-center gap-4">
           <select 
             class="select w-48" 
@@ -355,7 +398,7 @@ function renderHistory() {
         <div class="flex justify-center items-center py-12">
           <div class="spinner"></div>
         </div>
-      ` : state.requests.length === 0 ? `
+      ` : filteredRequests.length === 0 ? `
         <div class="card">
           <div class="py-12 text-center">
             <p class="text-gray-500">No removal requests found</p>
@@ -363,8 +406,28 @@ function renderHistory() {
           </div>
         </div>
       ` : `
-        <div class="grid gap-4">
-          ${state.requests.map(request => renderRequestCard(request)).join('')}
+        <div class="grid gap-6">
+          ${Object.entries(requestsByRepo).map(([repoId, requests]) => {
+            const repo = repoId === 'legacy' ? null : state.repositories.find(r => r.id === parseInt(repoId));
+            const repoName = repo ? repo.url : (requests[0].repositories ? requests[0].repositories.join(', ') : 'Unknown');
+            
+            return `
+              <div class="card bg-gray-50">
+                <div class="p-4">
+                  <h3 class="text-lg font-semibold text-gray-900 mb-4">
+                    Repository: ${repoName}
+                  </h3>
+                  <div class="grid gap-3">
+                    ${requests.map(request => `
+                      <div class="card bg-white">
+                        ${renderRequestCard(request)}
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join('')}
         </div>
       `}
     </div>
@@ -388,7 +451,7 @@ function renderRequestCard(request) {
               ${request.preserve_mode ? ` • Preserve: ${request.preserve_mode}` : ''}
             </p>
           </div>
-          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayText(request.status)}</span>
+          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayTextWithSpinner(request.status)}</span>
         </div>
         <div class="grid grid-cols-2 gap-4 text-sm mb-4">
           <div>
@@ -604,32 +667,20 @@ async function handleAddRepository(event) {
 }
 
 async function handleScanRepository(id) {
-  if (state.scanningRepositories.has(id)) {
-    return;
-  }
-  
   try {
-    state.scanningRepositories.add(id);
-    render();
-    
     await api.scanRepository(id);
     showToast('Scan started - this may take a few minutes');
-    
-    setTimeout(() => {
-      state.scanningRepositories.delete(id);
-      render();
-    }, 3000);
+    loadRepositories();
   } catch (error) {
-    state.scanningRepositories.delete(id);
-    render();
     showToast(error.message, 'error');
   }
 }
 
 async function handleViewFlags(repositoryId) {
   try {
+    const repository = state.repositories.find(r => r.id === repositoryId);
     const flags = await api.listFlags({ repository_id: repositoryId });
-    setState({ flags, view: 'flags' });
+    setState({ flags, view: 'flags', selectedRepository: repository });
     window.location.hash = 'flags';
   } catch (error) {
     showToast(error.message, 'error');
@@ -783,7 +834,7 @@ function render() {
           Repositories
         </div>
         <div class="tab ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history'); loadRequests();">
-          History
+          Removed Flags
         </div>
       </div>
     </div>
