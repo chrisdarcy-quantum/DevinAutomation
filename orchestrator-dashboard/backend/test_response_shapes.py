@@ -4,8 +4,7 @@ This prevents regressions where the frontend expects certain fields.
 """
 import unittest
 from fastapi.testclient import TestClient
-from app.main import app
-from app.database import Base, engine
+from app import app, Base, engine
 
 class TestResponseShapes(unittest.TestCase):
     """Test that API response shapes match frontend expectations."""
