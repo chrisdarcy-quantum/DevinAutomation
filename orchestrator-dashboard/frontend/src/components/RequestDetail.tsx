@@ -67,7 +67,7 @@ export function RequestDetail({ requestId }: RequestDetailProps) {
   };
 
   const calculateProgress = () => {
-    if (!request) return 0;
+    if (!request || !request.sessions || request.sessions.length === 0) return 0;
     const completed = request.sessions.filter(s => 
       s.status === 'finished' || s.status === 'failed' || s.status === 'expired'
     ).length;
@@ -138,7 +138,7 @@ export function RequestDetail({ requestId }: RequestDetailProps) {
               <div className="mt-2">
                 <Progress value={calculateProgress()} className="h-2" />
                 <p className="text-xs text-gray-500 mt-1">
-                  {request.sessions.filter(s => s.status === 'finished').length} / {request.sessions.length} completed
+                  {request.sessions?.filter(s => s.status === 'finished').length ?? 0} / {request.sessions?.length ?? 0} completed
                 </p>
               </div>
             </div>
@@ -162,14 +162,14 @@ export function RequestDetail({ requestId }: RequestDetailProps) {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {request.sessions.map((session) => (
+            {(request.sessions ?? []).map((session) => (
               <div
                 key={session.id}
                 className="p-4 border border-gray-200 rounded-lg hover:shadow-sm transition-shadow"
               >
                 <div className="flex justify-between items-start mb-3">
                   <div className="flex-1">
-                    <p className="font-medium text-gray-900">{session.repository_url}</p>
+                    <p className="font-medium text-gray-900">{session.repository}</p>
                     <p className="text-sm text-gray-500 mt-1">
                       Session ID: {session.devin_session_id || 'Pending'}
                     </p>
