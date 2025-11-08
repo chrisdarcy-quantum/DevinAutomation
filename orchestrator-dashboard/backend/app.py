@@ -345,6 +345,14 @@ class CreateRepository(BaseModel):
         return v
 
 
+class CurrentScan(APIModel):
+    """Response model for an active scan."""
+    status: str
+    devin_session_id: str
+    devin_session_url: str
+    started_at: Optional[str] = None
+
+
 class RepositoryResponse(APIModel):
     """Response model for a repository."""
     id: int
@@ -353,6 +361,7 @@ class RepositoryResponse(APIModel):
     last_scanned_at: Optional[datetime]
     created_at: datetime
     flag_count: int = 0
+    current_scan: Optional[CurrentScan] = None
 
 
 class DiscoveredFlagResponse(APIModel):
