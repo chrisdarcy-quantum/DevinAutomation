@@ -15,7 +15,8 @@ const state = {
   flags: [],
   statusFilter: 'all',
   loading: false,
-  eventSource: null
+  eventSource: null,
+  scanningRepositories: new Set()
 };
 
 function setState(updates) {
@@ -228,6 +229,8 @@ function renderRepositories() {
 }
 
 function renderRepositoryCard(repo) {
+  const isScanning = state.scanningRepositories.has(repo.id);
+  
   return `
     <div class="card">
       <div class="p-6">
@@ -245,8 +248,12 @@ function renderRepositoryCard(repo) {
           ${repo.last_scanned_at ? `<div>Last scan: ${formatDate(repo.last_scanned_at)}</div>` : '<div>Not scanned yet</div>'}
         </div>
         <div class="flex gap-2">
-          <button class="btn btn-outline btn-sm" onclick="handleScanRepository(${repo.id})">
-            Scan
+          <button 
+            class="btn btn-outline btn-sm ${isScanning ? 'opacity-50 cursor-not-allowed' : ''}" 
+            onclick="handleScanRepository(${repo.id})"
+            ${isScanning ? 'disabled' : ''}
+          >
+            ${isScanning ? '<span class="inline-block animate-spin mr-1">⟳</span> Scanning...' : 'Scan'}
           </button>
           <button class="btn btn-outline btn-sm" onclick="handleViewFlags(${repo.id})">
             View Flags
@@ -542,10 +549,24 @@ async function handleAddRepository(event) {
 }
 
 async function handleScanRepository(id) {
+  if (state.scanningRepositories.has(id)) {
+    return;
+  }
+  
   try {
+    state.scanningRepositories.add(id);
+    render();
+    
     await api.scanRepository(id);
     showToast('Scan started - this may take a few minutes');
+    
+    setTimeout(() => {
+      state.scanningRepositories.delete(id);
+      render();
+    }, 3000);
   } catch (error) {
+    state.scanningRepositories.delete(id);
+    render();
     showToast(error.message, 'error');
   }
 }
