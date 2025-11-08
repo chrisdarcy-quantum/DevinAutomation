@@ -949,12 +949,13 @@ if os.path.exists(FRONTEND_DIR):
 monitor_task = None
 queue_task = None
 devin_client = None
+session_queue = None
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and start background services."""
-    global monitor_task, queue_task, devin_client
+    global monitor_task, queue_task, devin_client, session_queue
     
     logger.info("Starting up application...")
     
@@ -970,10 +971,10 @@ async def startup_event():
     logger.info("Devin API client initialized")
     
     monitor = SessionMonitor(devin_client)
-    queue = SessionQueue(devin_client, max_concurrent=MAX_CONCURRENT_SESSIONS)
+    session_queue = SessionQueue(devin_client, max_concurrent=MAX_CONCURRENT_SESSIONS)
     
     monitor_task = asyncio.create_task(monitor.start())
-    queue_task = asyncio.create_task(queue.start())
+    queue_task = asyncio.create_task(session_queue.start())
     
     logger.info("Background services started")
 
@@ -1397,10 +1398,18 @@ async def scan_repository(id: int, db: Session = Depends(get_db)):
         if not repository:
             raise HTTPException(status_code=404, detail="Repository not found")
         
-        prompt = session_queue.build_discovery_prompt(
-            repository=repository.url,
-            github_token=repository.github_token
-        )
+        if session_queue is None:
+            if devin_client is None:
+                raise HTTPException(status_code=503, detail="Devin services not initialized")
+            prompt = SessionQueue(devin_client).build_discovery_prompt(
+                repository=repository.url,
+                github_token=repository.github_token
+            )
+        else:
+            prompt = session_queue.build_discovery_prompt(
+                repository=repository.url,
+                github_token=repository.github_token
+            )
         
         logger.info(f"Starting discovery scan for repository {id}: {repository.url}")
         
