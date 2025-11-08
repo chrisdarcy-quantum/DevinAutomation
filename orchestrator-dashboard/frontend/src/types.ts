@@ -1,4 +1,4 @@
-export interface RemovalRequest {
+export interface RemovalRequestListItem {
   id: number;
   flag_key: string;
   repositories: string[];
@@ -9,13 +9,19 @@ export interface RemovalRequest {
   updated_at: string;
   error_message: string | null;
   total_acu_consumed: number;
+  session_count: number;
+  completed_sessions: number;
+  failed_sessions: number;
+}
+
+export interface RemovalRequest extends RemovalRequestListItem {
   sessions: DevinSession[];
 }
 
 export interface DevinSession {
   id: number;
-  removal_request_id: number;
-  repository_url: string;
+  removal_request_id?: number;
+  repository: string;
   devin_session_id: string | null;
   devin_session_url: string | null;
   status: 'pending' | 'claimed' | 'working' | 'blocked' | 'finished' | 'expired' | 'failed';
@@ -24,7 +30,7 @@ export interface DevinSession {
   completed_at: string | null;
   error_message: string | null;
   pr_url: string | null;
-  acu_consumed: number;
+  acu_consumed: number | null;
   structured_output: Record<string, any> | null;
 }
 
@@ -45,7 +51,7 @@ export interface CreateRemovalRequestPayload {
 }
 
 export interface ListRemovalsResponse {
-  results: RemovalRequest[];
+  results: RemovalRequestListItem[];
   total: number;
   limit: number;
   offset: number;

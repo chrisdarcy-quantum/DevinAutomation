@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiClient } from '../api';
-import { RemovalRequest } from '../types';
+import { RemovalRequestListItem } from '../types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -14,7 +14,7 @@ interface DashboardProps {
 }
 
 export function Dashboard({ onRequestSelected, refreshTrigger }: DashboardProps) {
-  const [requests, setRequests] = useState<RemovalRequest[]>([]);
+  const [requests, setRequests] = useState<RemovalRequestListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const { toast } = useToast();
@@ -101,10 +101,10 @@ export function Dashboard({ onRequestSelected, refreshTrigger }: DashboardProps)
                 <div className="flex justify-between items-start">
                   <div>
                     <CardTitle className="text-lg">{request.flag_key}</CardTitle>
-                    <CardDescription className="mt-1">
-                      {request.repositories.length} {request.repositories.length === 1 ? 'repository' : 'repositories'}
-                      {request.feature_flag_provider && ` • ${request.feature_flag_provider}`}
-                    </CardDescription>
+                        <CardDescription className="mt-1">
+                          {Array.isArray(request.repositories) ? request.repositories.length : 0} {(Array.isArray(request.repositories) ? request.repositories.length : 0) === 1 ? 'repository' : 'repositories'}
+                          {request.feature_flag_provider && ` • ${request.feature_flag_provider}`}
+                        </CardDescription>
                   </div>
                   {getStatusBadge(request.status)}
                 </div>
@@ -124,7 +124,7 @@ export function Dashboard({ onRequestSelected, refreshTrigger }: DashboardProps)
                   <div>
                     <span className="text-gray-500">Sessions:</span>
                     <span className="ml-2 font-medium">
-                      {request.sessions.filter(s => s.status === 'finished').length} / {request.sessions.length} completed
+                      {request.completed_sessions ?? 0} / {request.session_count ?? 0} completed
                     </span>
                   </div>
                   <div>
