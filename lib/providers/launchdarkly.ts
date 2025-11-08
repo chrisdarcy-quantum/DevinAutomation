@@ -19,9 +19,9 @@ export class LaunchDarklyProvider implements FeatureFlagProvider {
       throw new Error(`LD API error: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as { items: Record<string, unknown>[] };
     
-    const flags = data.items.map((flag: any) => this.transformFlag(flag, config.envKey));
+    const flags = data.items.map((flag: Record<string, unknown>) => this.transformFlag(flag, config.envKey));
     
     if (search) {
       const searchLower = search.toLowerCase();
@@ -53,7 +53,7 @@ export class LaunchDarklyProvider implements FeatureFlagProvider {
     return this.transformFlag(flag, config.envKey);
   }
 
-  private transformFlag(ldFlag: any, envKey: string): FlagSummary {
+  private transformFlag(ldFlag: Record<string, unknown>, envKey: string): FlagSummary {
     const envData = ldFlag.environments?.[envKey];
     const lastEval = envData?.lastRequested;
     const daysSince = lastEval ? this.daysSince(lastEval) : null;

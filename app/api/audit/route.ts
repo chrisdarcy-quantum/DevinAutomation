@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
 
     querySchema.parse({ userId, flagKey, action, limit: limit.toString() });
 
-    const where: any = {};
+    const where: { userId?: string; flagKey?: string; action?: string } = {};
     if (userId) where.userId = userId;
     if (flagKey) where.flagKey = flagKey;
     if (action) where.action = action;

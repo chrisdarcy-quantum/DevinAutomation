@@ -54,7 +54,7 @@ export class CodeScanner {
             );
             matches.push(...fileMatches);
             scannedFiles++;
-          } catch (error) {
+          } catch {
             skippedFiles++;
           }
         }
@@ -95,7 +95,7 @@ export class CodeScanner {
       const line = lines[lineIndex];
 
       for (const regex of flagPatterns) {
-        regex.lastIndex = 0; // Reset regex state
+        regex.lastIndex = 0;
         const match = regex.exec(line);
 
         if (match) {
@@ -122,7 +122,7 @@ export class CodeScanner {
 
   private determineMatchType(
     line: string,
-    hasSDK: boolean
+    _hasSDK: boolean
   ): 'sdk_call' | 'string_literal' | 'config' | 'test' {
     if (line.includes('.variation') || line.includes('Variation')) {
       return 'sdk_call';

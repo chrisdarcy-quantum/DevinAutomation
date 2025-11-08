@@ -21,7 +21,7 @@ interface AuditLog {
   repos: string[];
   success: boolean;
   errorMsg: string | null;
-  metadata: any;
+  metadata: Record<string, unknown> | null;
   createdAt: string;
   user: {
     id: string;

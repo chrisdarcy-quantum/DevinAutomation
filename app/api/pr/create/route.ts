@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const repos = JSON.parse(session.repos);
+    JSON.parse(session.repos);
     const scanResults = session.scanResults ? JSON.parse(session.scanResults) : [];
 
     if (scanResults.length === 0) {
@@ -122,11 +122,33 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function generatePRBody(session: any, scanResult: any): string {
+interface ScanMatch {
+  file: string;
+  line: number;
+  confidence: string;
+  matchType: string;
+  snippet: string;
+  language: string;
+}
+
+interface ScanResult {
+  totalMatches: number;
+  scannedFiles: number;
+  scanDurationMs: number;
+  matches: ScanMatch[];
+}
+
+interface SessionData {
+  flagKey: string;
+  provider: string;
+  lastEvaluatedAt?: string;
+}
+
+function generatePRBody(session: SessionData, scanResult: ScanResult): string {
   const matches = scanResult.matches || [];
-  const highConfidence = matches.filter((m: any) => m.confidence === 'high').length;
-  const mediumConfidence = matches.filter((m: any) => m.confidence === 'medium').length;
-  const lowConfidence = matches.filter((m: any) => m.confidence === 'low').length;
+  const highConfidence = matches.filter((m: ScanMatch) => m.confidence === 'high').length;
+  const mediumConfidence = matches.filter((m: ScanMatch) => m.confidence === 'medium').length;
+  const lowConfidence = matches.filter((m: ScanMatch) => m.confidence === 'low').length;
 
   return `## 🚩 Feature Flag Removal: \`${session.flagKey}\`
 
@@ -144,7 +166,7 @@ function generatePRBody(session: any, scanResult: any): string {
 - 🔴 Low confidence: ${lowConfidence}
 
 ### 📝 Matches Found
-${matches.slice(0, 10).map((m: any) => `
+${matches.slice(0, 10).map((m: ScanMatch) => `
 **${m.file}:${m.line}**
 - Type: ${m.matchType}
 - Confidence: ${m.confidence}
