@@ -671,17 +671,15 @@ Important:
 - If tests fail, investigate and fix
 - If you need clarification, ask before proceeding
 
-IMPORTANT: Return structured output in this EXACT JSON format:
-{{
-  "pr_url": "https://github.com/...",
-  "files_modified": ["path/to/file1.py", "path/to/file2.js"],
-  "occurrences_removed": 12,
-  "test_results": "PASSED" or "FAILED" or "SKIPPED",
-  "warnings": ["Any warnings or issues encountered"],
-  "acu_consumed": 450
-}}
+IMPORTANT: Return structured output as a JSON object with these keys and types:
+- pr_url: string (the GitHub PR URL you created, or null if unable to create)
+- files_modified: array of strings (paths to files you changed)
+- occurrences_removed: integer (count of flag occurrences you removed)
+- test_results: string (one of: "PASSED", "FAILED", or "SKIPPED")
+- warnings: array of strings (any issues you encountered)
+- acu_consumed: integer (actual ACU credits used for this session)
 
-If you cannot create a PR, set pr_url to null and explain in warnings.
+Populate all values using the actual results of your work. Do not use placeholder or example values.
 """
         return prompt
     
