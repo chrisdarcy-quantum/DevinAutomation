@@ -1019,14 +1019,29 @@ class TestRemovalWithRepository(unittest.TestCase):
 class TestDiscoveryPrompt(unittest.TestCase):
     """Test discovery prompt generation."""
     
+    @classmethod
+    def setUpClass(cls):
+        """Set up test database and client."""
+        cls.engine = create_engine("sqlite:///./test_discovery.db", connect_args={"check_same_thread": False})
+        cls.TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test database file."""
+        import os
+        if os.path.exists("./test_discovery.db"):
+            os.remove("./test_discovery.db")
+    
     def setUp(self):
         """Set up test database."""
-        self.db = SessionLocal()
+        Base.metadata.create_all(bind=self.__class__.engine)
+        self.db = self.__class__.TestingSessionLocal()
         self.mock_client = MagicMock()
     
     def tearDown(self):
         """Clean up test database."""
         self.db.close()
+        Base.metadata.drop_all(bind=self.__class__.engine)
     
     def test_build_discovery_prompt(self):
         """Test that discovery prompt is generated correctly."""
