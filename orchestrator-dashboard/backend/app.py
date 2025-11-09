@@ -1499,8 +1499,13 @@ async def delete_repository(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def sync_launchdarkly_flags(repository_id: int, db: Session):
-    """Sync flags from LaunchDarkly for a repository."""
+def sync_launchdarkly_flags(repository_id: int):
+    """Sync flags from LaunchDarkly for a repository.
+    
+    This function creates its own database session to avoid issues with
+    the request-scoped session being closed when running as a background task.
+    """
+    db = SessionLocal()
     try:
         repo = db.query(Repository).filter_by(id=repository_id).first()
         if not repo:
@@ -1548,6 +1553,8 @@ def sync_launchdarkly_flags(repository_id: int, db: Session):
     except Exception as e:
         logger.error(f"Error syncing LaunchDarkly flags for repository {repository_id}: {e}", exc_info=True)
         db.rollback()
+    finally:
+        db.close()
 
 
 def _format_flag_response(flag: DiscoveredFlag, repository_url: Optional[str] = None) -> DiscoveredFlagResponse:
@@ -1717,7 +1724,7 @@ async def scan_repository(id: int, background_tasks: BackgroundTasks, db: Sessio
             raise HTTPException(status_code=404, detail="Repository not found")
         
         if repository.launchdarkly_api_token and repository.launchdarkly_project_key:
-            background_tasks.add_task(sync_launchdarkly_flags, id, db)
+            background_tasks.add_task(sync_launchdarkly_flags, id)
             logger.info(f"Scheduled LaunchDarkly sync for repository {id}")
         
         if session_queue is None:
