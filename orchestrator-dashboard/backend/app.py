@@ -65,6 +65,10 @@ class RemovalRequest(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     error_message = Column(Text, nullable=True)
     total_acu_consumed = Column(Integer, default=0)
+    merged_at = Column(DateTime, nullable=True)
+    merged_by = Column(String, nullable=True)
+    ld_archived_at = Column(DateTime, nullable=True)
+    ld_archive_error = Column(Text, nullable=True)
     
     repository = relationship("Repository", back_populates="removal_requests")
     sessions = relationship("DevinSession", back_populates="removal_request", cascade="all, delete-orphan")
@@ -184,7 +188,11 @@ def init_db():
             ("launchdarkly_api_token", "ALTER TABLE repositories ADD COLUMN launchdarkly_api_token TEXT"),
             ("launchdarkly_project_key", "ALTER TABLE repositories ADD COLUMN launchdarkly_project_key TEXT"),
             ("launchdarkly_environment_key", "ALTER TABLE repositories ADD COLUMN launchdarkly_environment_key TEXT"),
-            ("last_ld_synced_at", "ALTER TABLE repositories ADD COLUMN last_ld_synced_at DATETIME")
+            ("last_ld_synced_at", "ALTER TABLE repositories ADD COLUMN last_ld_synced_at DATETIME"),
+            ("merged_at", "ALTER TABLE removal_requests ADD COLUMN merged_at DATETIME"),
+            ("merged_by", "ALTER TABLE removal_requests ADD COLUMN merged_by TEXT"),
+            ("ld_archived_at", "ALTER TABLE removal_requests ADD COLUMN ld_archived_at DATETIME"),
+            ("ld_archive_error", "ALTER TABLE removal_requests ADD COLUMN ld_archive_error TEXT")
         ]
         
         for column_name, sql in migrations:
@@ -323,6 +331,10 @@ class RemovalRequestResponse(APIModel):
     updated_at: datetime
     error_message: Optional[str]
     total_acu_consumed: int
+    merged_at: Optional[datetime] = None
+    merged_by: Optional[str] = None
+    ld_archived_at: Optional[datetime] = None
+    ld_archive_error: Optional[str] = None
     sessions: List[SessionResponse] = []
 
 
@@ -341,6 +353,10 @@ class RemovalRequestListItem(APIModel):
     completed_sessions: int
     failed_sessions: int
     total_acu_consumed: int = 0
+    merged_at: Optional[datetime] = None
+    merged_by: Optional[str] = None
+    ld_archived_at: Optional[datetime] = None
+    ld_archive_error: Optional[str] = None
 
 
 class RemovalRequestListResponse(BaseModel):
@@ -1273,7 +1289,11 @@ async def list_removals(
                 session_count=len(sessions),
                 completed_sessions=sum(1 for s in sessions if s.status in ['finished', 'expired']),
                 failed_sessions=sum(1 for s in sessions if s.error_message or s.status == 'expired'),
-                total_acu_consumed=req.total_acu_consumed
+                total_acu_consumed=req.total_acu_consumed,
+                merged_at=req.merged_at,
+                merged_by=req.merged_by,
+                ld_archived_at=req.ld_archived_at,
+                ld_archive_error=req.ld_archive_error
             ))
         
         return RemovalRequestListResponse(
@@ -1775,6 +1795,76 @@ async def scan_repository(id: int, background_tasks: BackgroundTasks, db: Sessio
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/removals/{id}/mark-merged")
+async def mark_removal_merged(id: int, background_tasks: BackgroundTasks, merged_by: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Mark a removal request as merged and archive the flag in LaunchDarkly.
+    
+    This endpoint:
+    1. Marks the removal request as merged
+    2. Archives the flag in LaunchDarkly (if credentials available)
+    3. Triggers a background sync to refresh provider flags
+    """
+    try:
+        removal_request = db.query(RemovalRequest).filter_by(id=id).first()
+        if not removal_request:
+            raise HTTPException(status_code=404, detail="Removal request not found")
+        
+        repositories_urls = json.loads(removal_request.repositories)
+        ld_repo = None
+        
+        for repo_url in repositories_urls:
+            repo = db.query(Repository).filter_by(url=repo_url).first()
+            if repo and repo.launchdarkly_api_token and repo.launchdarkly_project_key:
+                ld_repo = repo
+                break
+        
+        removal_request.merged_at = datetime.utcnow()
+        if merged_by:
+            removal_request.merged_by = merged_by
+        
+        if ld_repo:
+            try:
+                ld_client = LaunchDarklyClient(
+                    api_token=ld_repo.launchdarkly_api_token,
+                    project_key=ld_repo.launchdarkly_project_key
+                )
+                
+                ld_client.archive_flag(removal_request.flag_key)
+                
+                removal_request.ld_archived_at = datetime.utcnow()
+                removal_request.ld_archive_error = None
+                
+                background_tasks.add_task(sync_launchdarkly_flags, ld_repo.id)
+                
+                logger.info(f"Archived flag {removal_request.flag_key} in LaunchDarkly for removal request {id}")
+                
+            except Exception as e:
+                error_msg = str(e)
+                removal_request.ld_archive_error = error_msg
+                logger.error(f"Failed to archive flag {removal_request.flag_key} in LaunchDarkly: {error_msg}")
+        else:
+            logger.info(f"No LaunchDarkly credentials found for removal request {id}, skipping archive")
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "merged": True,
+            "merged_at": removal_request.merged_at.isoformat(),
+            "ld_archived": removal_request.ld_archived_at is not None,
+            "ld_archived_at": removal_request.ld_archived_at.isoformat() if removal_request.ld_archived_at else None,
+            "ld_archive_error": removal_request.ld_archive_error
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error marking removal request {id} as merged: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/removals/{id}/stream")
 async def stream_removal_status(id: int, db: Session = Depends(get_db)):
     """
@@ -1903,5 +1993,9 @@ def _build_removal_response(removal_request: RemovalRequest) -> RemovalRequestRe
         updated_at=removal_request.updated_at,
         error_message=removal_request.error_message,
         total_acu_consumed=removal_request.total_acu_consumed,
+        merged_at=removal_request.merged_at,
+        merged_by=removal_request.merged_by,
+        ld_archived_at=removal_request.ld_archived_at,
+        ld_archive_error=removal_request.ld_archive_error,
         sessions=sessions
     )
