@@ -22,7 +22,20 @@ A complete Python client for interacting with the Devin AI API, featuring:
 - ✅ Comprehensive error handling
 - ✅ Verbose logging option
 
-### 2. Research Documentation (`PHASE1_FINDINGS.md`)
+### 2. LaunchDarkly Integration (`launchdarkly_client.py`)
+
+A complete Python client for LaunchDarkly integration, featuring:
+
+- ✅ Retrieve feature flags from LaunchDarkly API
+- ✅ Scan codebases for flag references
+- ✅ Compare LaunchDarkly flags with code usage
+- ✅ Identify stale flags for removal
+- ✅ Generate detailed comparison reports
+- ✅ Support for multiple file types and patterns
+
+See [LAUNCHDARKLY_INTEGRATION.md](LAUNCHDARKLY_INTEGRATION.md) for detailed documentation.
+
+### 3. Research Documentation (`PHASE1_FINDINGS.md`)
 
 Comprehensive documentation covering:
 

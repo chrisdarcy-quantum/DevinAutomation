@@ -3,7 +3,7 @@ Feature Flag Removal Orchestration Dashboard - Lightweight Backend
 Single-file FastAPI application with all functionality consolidated.
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -22,6 +22,10 @@ import logging
 import os
 import time
 import requests
+import sys
+
+sys.path.insert(0, os.path.dirname(__file__))
+from launchdarkly_client import LaunchDarklyClient, LaunchDarklyFlag
 
 logging.basicConfig(
     level=logging.INFO,
@@ -112,11 +116,16 @@ class Repository(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     url = Column(String, nullable=False, unique=True, index=True)
     github_token = Column(String, nullable=True)  # For private repos, never returned in API
+    launchdarkly_api_token = Column(String, nullable=True)  # LaunchDarkly API token, never returned in API
+    launchdarkly_project_key = Column(String, nullable=True)  # LaunchDarkly project key
+    launchdarkly_environment_key = Column(String, nullable=True)  # Optional environment filter
     provider_detected = Column(String, nullable=True)  # LaunchDarkly, Statsig, etc.
     last_scanned_at = Column(DateTime, nullable=True)
+    last_ld_synced_at = Column(DateTime, nullable=True)  # Last LaunchDarkly sync timestamp
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     
     discovered_flags = relationship("DiscoveredFlag", back_populates="repository", cascade="all, delete-orphan")
+    provider_flags = relationship("ProviderFlag", back_populates="repository", cascade="all, delete-orphan")
     removal_requests = relationship("RemovalRequest", back_populates="repository")
 
 
@@ -140,6 +149,30 @@ class DiscoveredFlag(Base):
     )
 
 
+class ProviderFlag(Base):
+    """Stores flags retrieved from feature flag providers (e.g., LaunchDarkly)."""
+    
+    __tablename__ = "provider_flags"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    repository_id = Column(Integer, ForeignKey("repositories.id"), nullable=False, index=True)
+    provider = Column(String, nullable=False, index=True)  # e.g., "LaunchDarkly"
+    flag_key = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=True)
+    kind = Column(String, nullable=True)  # boolean, multivariate, etc.
+    description = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)  # JSON array
+    archived = Column(Integer, nullable=False, default=0)  # SQLite boolean
+    temporary = Column(Integer, nullable=False, default=0)  # SQLite boolean
+    last_synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    repository = relationship("Repository", back_populates="provider_flags")
+    
+    __table_args__ = (
+        UniqueConstraint('repository_id', 'provider', 'flag_key', name='uix_repo_provider_flag'),
+    )
+
+
 def init_db():
     """Initialize the database by creating all tables."""
     Base.metadata.create_all(bind=engine)
@@ -147,7 +180,11 @@ def init_db():
     if "sqlite" in DATABASE_URL:
         migrations = [
             ("preserve_mode", "ALTER TABLE removal_requests ADD COLUMN preserve_mode TEXT DEFAULT 'enabled' NOT NULL"),
-            ("repository_id", "ALTER TABLE removal_requests ADD COLUMN repository_id INTEGER")
+            ("repository_id", "ALTER TABLE removal_requests ADD COLUMN repository_id INTEGER"),
+            ("launchdarkly_api_token", "ALTER TABLE repositories ADD COLUMN launchdarkly_api_token TEXT"),
+            ("launchdarkly_project_key", "ALTER TABLE repositories ADD COLUMN launchdarkly_project_key TEXT"),
+            ("launchdarkly_environment_key", "ALTER TABLE repositories ADD COLUMN launchdarkly_environment_key TEXT"),
+            ("last_ld_synced_at", "ALTER TABLE repositories ADD COLUMN last_ld_synced_at DATETIME")
         ]
         
         for column_name, sql in migrations:
@@ -155,7 +192,7 @@ def init_db():
                 with engine.connect() as conn:
                     conn.execute(text(sql))
                     conn.commit()
-                    logger.info(f"Added {column_name} column to removal_requests table")
+                    logger.info(f"Added {column_name} column")
             except Exception as e:
                 if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
                     logger.warning(f"Could not add {column_name} column (may already exist): {e}")
@@ -334,6 +371,9 @@ class CreateRepository(BaseModel):
     """Request body for creating a new repository."""
     url: str = Field(..., min_length=1, description="Repository URL")
     github_token: Optional[str] = Field(None, description="GitHub token for private repos")
+    launchdarkly_api_token: Optional[str] = Field(None, description="LaunchDarkly API access token")
+    launchdarkly_project_key: Optional[str] = Field(None, description="LaunchDarkly project key")
+    launchdarkly_environment_key: Optional[str] = Field(None, description="LaunchDarkly environment key (optional)")
     
     @validator('url')
     def validate_url(cls, v):
@@ -1314,9 +1354,17 @@ async def create_repository(
                 detail=f"Repository already exists with id {existing.id}"
             )
         
+        provider_detected = None
+        if body.launchdarkly_api_token and body.launchdarkly_project_key:
+            provider_detected = "LaunchDarkly"
+        
         repository = Repository(
             url=body.url,
             github_token=body.github_token,
+            launchdarkly_api_token=body.launchdarkly_api_token,
+            launchdarkly_project_key=body.launchdarkly_project_key,
+            launchdarkly_environment_key=body.launchdarkly_environment_key,
+            provider_detected=provider_detected,
             created_at=datetime.utcnow()
         )
         db.add(repository)
@@ -1451,6 +1499,57 @@ async def delete_repository(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def sync_launchdarkly_flags(repository_id: int, db: Session):
+    """Sync flags from LaunchDarkly for a repository."""
+    try:
+        repo = db.query(Repository).filter_by(id=repository_id).first()
+        if not repo:
+            logger.error(f"Repository {repository_id} not found")
+            return
+        
+        if not repo.launchdarkly_api_token or not repo.launchdarkly_project_key:
+            logger.info(f"Repository {repository_id} has no LaunchDarkly credentials, skipping sync")
+            return
+        
+        logger.info(f"Syncing LaunchDarkly flags for repository {repository_id}")
+        
+        ld_client = LaunchDarklyClient(
+            api_token=repo.launchdarkly_api_token,
+            project_key=repo.launchdarkly_project_key
+        )
+        
+        ld_flags = ld_client.get_flags(environment=repo.launchdarkly_environment_key)
+        
+        db.query(ProviderFlag).filter_by(
+            repository_id=repository_id,
+            provider="LaunchDarkly"
+        ).delete()
+        
+        for flag in ld_flags:
+            provider_flag = ProviderFlag(
+                repository_id=repository_id,
+                provider="LaunchDarkly",
+                flag_key=flag.key,
+                name=flag.name,
+                kind=flag.kind,
+                description=flag.description,
+                tags=json.dumps(flag.tags) if flag.tags else None,
+                archived=1 if flag.archived else 0,
+                temporary=1 if flag.temporary else 0,
+                last_synced_at=datetime.utcnow()
+            )
+            db.add(provider_flag)
+        
+        repo.last_ld_synced_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Synced {len(ld_flags)} LaunchDarkly flags for repository {repository_id}")
+        
+    except Exception as e:
+        logger.error(f"Error syncing LaunchDarkly flags for repository {repository_id}: {e}", exc_info=True)
+        db.rollback()
+
+
 def _format_flag_response(flag: DiscoveredFlag, repository_url: Optional[str] = None) -> DiscoveredFlagResponse:
     """Helper to format a DiscoveredFlag as a response object."""
     files = []
@@ -1520,8 +1619,93 @@ async def list_flags(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/repositories/{id}/flag-comparison")
+async def get_flag_comparison(id: int, db: Session = Depends(get_db)):
+    """Get comparison between LaunchDarkly flags and code-discovered flags."""
+    try:
+        repository = db.query(Repository).filter_by(id=id).first()
+        if not repository:
+            raise HTTPException(status_code=404, detail="Repository not found")
+        
+        ld_flags = db.query(ProviderFlag).filter_by(
+            repository_id=id,
+            provider="LaunchDarkly"
+        ).all()
+        
+        code_flags = db.query(DiscoveredFlag).filter_by(repository_id=id).all()
+        
+        ld_flag_keys = {flag.flag_key for flag in ld_flags}
+        code_flag_keys = {flag.flag_key for flag in code_flags}
+        
+        flags_in_ld_only = sorted(list(ld_flag_keys - code_flag_keys))
+        flags_in_code_only = sorted(list(code_flag_keys - ld_flag_keys))
+        flags_in_both = sorted(list(ld_flag_keys & code_flag_keys))
+        
+        ld_flag_details = {
+            flag.flag_key: {
+                "name": flag.name,
+                "kind": flag.kind,
+                "description": flag.description,
+                "archived": bool(flag.archived),
+                "temporary": bool(flag.temporary),
+                "tags": json.loads(flag.tags) if flag.tags else []
+            }
+            for flag in ld_flags
+        }
+        
+        code_flag_details = {
+            flag.flag_key: {
+                "occurrences": flag.occurrences,
+                "files": json.loads(flag.files) if flag.files else []
+            }
+            for flag in code_flags
+        }
+        
+        return {
+            "repository_id": id,
+            "repository_url": repository.url,
+            "last_ld_synced_at": repository.last_ld_synced_at.isoformat() if repository.last_ld_synced_at else None,
+            "last_code_scanned_at": repository.last_scanned_at.isoformat() if repository.last_scanned_at else None,
+            "summary": {
+                "flags_in_ld_only": len(flags_in_ld_only),
+                "flags_in_code_only": len(flags_in_code_only),
+                "flags_in_both": len(flags_in_both),
+                "total_ld_flags": len(ld_flags),
+                "total_code_flags": len(code_flags)
+            },
+            "flags_in_ld_only": [
+                {
+                    "flag_key": key,
+                    **ld_flag_details[key]
+                }
+                for key in flags_in_ld_only
+            ],
+            "flags_in_code_only": [
+                {
+                    "flag_key": key,
+                    **code_flag_details[key]
+                }
+                for key in flags_in_code_only
+            ],
+            "flags_in_both": [
+                {
+                    "flag_key": key,
+                    "ld": ld_flag_details[key],
+                    "code": code_flag_details[key]
+                }
+                for key in flags_in_both
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting flag comparison for repository {id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/repositories/{id}/scan", status_code=202)
-async def scan_repository(id: int, db: Session = Depends(get_db)):
+async def scan_repository(id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Trigger a flag discovery scan for a repository."""
     try:
         if devin_client is None:
@@ -1531,6 +1715,10 @@ async def scan_repository(id: int, db: Session = Depends(get_db)):
         
         if not repository:
             raise HTTPException(status_code=404, detail="Repository not found")
+        
+        if repository.launchdarkly_api_token and repository.launchdarkly_project_key:
+            background_tasks.add_task(sync_launchdarkly_flags, id, db)
+            logger.info(f"Scheduled LaunchDarkly sync for repository {id}")
         
         if session_queue is None:
             prompt = SessionQueue(devin_client).build_discovery_prompt(

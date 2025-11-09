@@ -13,6 +13,7 @@ const state = {
   requestDetails: {},
   repositories: [],
   flags: [],
+  flagComparison: null,
   statusFilter: 'all',
   loading: false,
   eventSource: null,
@@ -77,6 +78,10 @@ const api = {
   async listFlags(params = {}) {
     const queryString = new URLSearchParams(params).toString();
     return fetchJson(`${API_BASE_URL}/api/flags${queryString ? '?' + queryString : ''}`);
+  },
+
+  async getFlagComparison(repositoryId) {
+    return fetchJson(`${API_BASE_URL}/api/repositories/${repositoryId}/flag-comparison`);
   },
 
   streamStatus(id, onUpdate) {
@@ -318,6 +323,9 @@ function renderFlags() {
     ? '<p class="text-sm text-gray-500 mt-1">Scanned - no flags found</p>' 
     : '';
   
+  const hasLaunchDarkly = state.selectedRepository && state.selectedRepository.provider_detected === 'LaunchDarkly';
+  const comparison = state.flagComparison;
+  
   return `
     <div class="space-y-6">
       <div class="flex justify-between items-center">
@@ -325,17 +333,43 @@ function renderFlags() {
           <h2 class="text-xl font-semibold text-gray-900">Discovered Flags</h2>
           <p class="text-sm text-gray-600 mt-1">Repository: ${repositoryName}</p>
           ${scanStatus}
+          ${hasLaunchDarkly ? '<span class="badge badge-default text-xs ml-2">LaunchDarkly Connected</span>' : ''}
         </div>
         <button class="btn btn-outline" onclick="loadFlags()">
           Refresh
         </button>
       </div>
 
+      ${hasLaunchDarkly && comparison ? `
+        <div class="card bg-blue-50 border border-blue-200">
+          <div class="p-4">
+            <h3 class="text-sm font-semibold text-gray-900 mb-3">LaunchDarkly Comparison</h3>
+            <div class="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <div class="text-2xl font-bold text-orange-600">${comparison.summary.flags_in_ld_only}</div>
+                <div class="text-xs text-gray-600 mt-1">In LaunchDarkly Only</div>
+                <div class="text-xs text-gray-500">(Potential stale flags)</div>
+              </div>
+              <div>
+                <div class="text-2xl font-bold text-purple-600">${comparison.summary.flags_in_code_only}</div>
+                <div class="text-xs text-gray-600 mt-1">In Code Only</div>
+                <div class="text-xs text-gray-500">(Not in LaunchDarkly)</div>
+              </div>
+              <div>
+                <div class="text-2xl font-bold text-green-600">${comparison.summary.flags_in_both}</div>
+                <div class="text-xs text-gray-600 mt-1">In Both</div>
+                <div class="text-xs text-gray-500">(Properly managed)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+
       ${state.loading ? `
         <div class="flex justify-center items-center py-12">
           <div class="spinner"></div>
         </div>
-      ` : state.flags.length === 0 ? `
+      ` : state.flags.length === 0 && (!comparison || comparison.summary.total_ld_flags === 0) ? `
         <div class="card">
           <div class="py-12 text-center">
             <p class="text-gray-500">No flags discovered yet</p>
@@ -565,6 +599,51 @@ function showAddRepositoryModal() {
             <p class="text-xs text-gray-500 mt-1">Only needed for private repositories</p>
           </div>
 
+          <div class="border-t border-gray-200 pt-4 mt-4">
+            <label class="block text-sm font-medium text-gray-700 mb-3">
+              LaunchDarkly Integration (optional)
+            </label>
+            
+            <div class="space-y-3">
+              <div>
+                <label class="block text-xs text-gray-600 mb-1">
+                  API Access Token
+                </label>
+                <input 
+                  type="password" 
+                  name="launchdarkly_api_token" 
+                  class="input" 
+                  placeholder="LaunchDarkly API token"
+                />
+              </div>
+
+              <div>
+                <label class="block text-xs text-gray-600 mb-1">
+                  Project Key
+                </label>
+                <input 
+                  type="text" 
+                  name="launchdarkly_project_key" 
+                  class="input" 
+                  placeholder="default"
+                />
+              </div>
+
+              <div>
+                <label class="block text-xs text-gray-600 mb-1">
+                  Environment Key (optional)
+                </label>
+                <input 
+                  type="text" 
+                  name="launchdarkly_environment_key" 
+                  class="input" 
+                  placeholder="production"
+                />
+              </div>
+            </div>
+            <p class="text-xs text-gray-500 mt-2">Connect to LaunchDarkly to compare flags with your codebase</p>
+          </div>
+
           <div class="flex gap-3 pt-4">
             <button type="submit" class="btn btn-primary flex-1">
               Add & Scan
@@ -586,7 +665,10 @@ async function handleAddRepository(event) {
   const formData = new FormData(event.target);
   const data = {
     url: formData.get('url'),
-    github_token: formData.get('github_token') || null
+    github_token: formData.get('github_token') || null,
+    launchdarkly_api_token: formData.get('launchdarkly_api_token') || null,
+    launchdarkly_project_key: formData.get('launchdarkly_project_key') || null,
+    launchdarkly_environment_key: formData.get('launchdarkly_environment_key') || null
   };
 
   try {
@@ -617,7 +699,17 @@ async function handleViewFlags(repositoryId) {
   try {
     const repository = state.repositories.find(r => r.id === repositoryId);
     const flags = await api.listFlags({ repository_id: repositoryId });
-    setState({ flags, view: 'flags', selectedRepository: repository });
+    
+    let comparison = null;
+    if (repository && repository.provider_detected === 'LaunchDarkly') {
+      try {
+        comparison = await api.getFlagComparison(repositoryId);
+      } catch (e) {
+        console.error('Failed to load flag comparison:', e);
+      }
+    }
+    
+    setState({ flags, view: 'flags', selectedRepository: repository, flagComparison: comparison });
     window.location.hash = 'flags';
   } catch (error) {
     showToast(error.message, 'error');
