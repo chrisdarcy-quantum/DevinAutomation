@@ -1810,14 +1810,20 @@ async def mark_removal_merged(id: int, background_tasks: BackgroundTasks, merged
         if not removal_request:
             raise HTTPException(status_code=404, detail="Removal request not found")
         
-        repositories_urls = json.loads(removal_request.repositories)
         ld_repo = None
         
-        for repo_url in repositories_urls:
-            repo = db.query(Repository).filter_by(url=repo_url).first()
+        if removal_request.repository_id:
+            repo = db.query(Repository).filter_by(id=removal_request.repository_id).first()
             if repo and repo.launchdarkly_api_token and repo.launchdarkly_project_key:
                 ld_repo = repo
-                break
+        
+        if not ld_repo:
+            repositories_urls = json.loads(removal_request.repositories or "[]")
+            for repo_url in repositories_urls:
+                repo = db.query(Repository).filter_by(url=repo_url).first()
+                if repo and repo.launchdarkly_api_token and repo.launchdarkly_project_key:
+                    ld_repo = repo
+                    break
         
         removal_request.merged_at = datetime.utcnow()
         if merged_by:
