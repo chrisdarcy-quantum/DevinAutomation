@@ -505,6 +505,7 @@ function renderRequestCard(request) {
   
   const devinLinks = sessions.map(s => s.devin_session_url).filter(Boolean);
   const prLinks = sessions.map(s => s.pr_url || s.structured_output?.pr_url).filter(Boolean);
+  const hasPR = prLinks.length > 0;
   
   return `
     <div class="card">
@@ -528,8 +529,8 @@ function renderRequestCard(request) {
                   '<span class="badge badge-secondary text-xs" title="' + request.ld_archive_error + '">Merged ✅ • LD failed</span>' :
                   '<span class="badge badge-secondary text-xs">Merged ✅</span>'
             ) : (
-              request.status === 'completed' ?
-                '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); handleMarkMerged(' + request.id + ')" id="merge-btn-' + request.id + '">Merged?</button>' :
+              (hasPR || request.status === 'completed') ?
+                '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); handleMarkMerged(' + request.id + ')" id="merge-btn-' + request.id + '" title="Mark as merged and archive in LaunchDarkly">Merged?</button>' :
                 ''
             )}
           </div>
