@@ -1850,6 +1850,7 @@ async def mark_removal_merged(id: int, background_tasks: BackgroundTasks, merged
                 removal_request.ld_archive_error = error_msg
                 logger.error(f"Failed to archive flag {removal_request.flag_key} in LaunchDarkly: {error_msg}")
         else:
+            removal_request.ld_archive_error = "No LaunchDarkly credentials found for this request"
             logger.info(f"No LaunchDarkly credentials found for removal request {id}, skipping archive")
         
         db.commit()
