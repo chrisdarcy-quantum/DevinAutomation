@@ -303,6 +303,7 @@ class RemovalRequestListItem(APIModel):
     session_count: int
     completed_sessions: int
     failed_sessions: int
+    total_acu_consumed: int = 0
 
 
 class RemovalRequestListResponse(BaseModel):
@@ -1231,7 +1232,8 @@ async def list_removals(
                 updated_at=req.updated_at,
                 session_count=len(sessions),
                 completed_sessions=sum(1 for s in sessions if s.status in ['finished', 'expired']),
-                failed_sessions=sum(1 for s in sessions if s.error_message or s.status == 'expired')
+                failed_sessions=sum(1 for s in sessions if s.error_message or s.status == 'expired'),
+                total_acu_consumed=req.total_acu_consumed
             ))
         
         return RemovalRequestListResponse(
