@@ -92,6 +92,42 @@ class LaunchDarklyClient:
             "Content-Type": "application/json"
         }
     
+    def archive_flag(self, flag_key: str) -> bool:
+        """
+        Archive a feature flag in LaunchDarkly.
+        
+        Args:
+            flag_key: The key of the flag to archive
+        
+        Returns:
+            True if successful, False otherwise
+        
+        Raises:
+            requests.exceptions.RequestException: If the API request fails
+        """
+        url = f"{self.BASE_URL}/flags/{self.project_key}/{flag_key}"
+        
+        # LaunchDarkly uses JSON Patch format for updates
+        patch_operations = [
+            {
+                "op": "replace",
+                "path": "/archived",
+                "value": True
+            }
+        ]
+        
+        try:
+            response = requests.patch(url, json=patch_operations, headers=self.headers)
+            
+            if response.status_code == 409:
+                return True
+            
+            response.raise_for_status()
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            raise e
+    
     def get_flags(self, environment: Optional[str] = None) -> List[LaunchDarklyFlag]:
         """
         Retrieve all feature flags from LaunchDarkly for the configured project.

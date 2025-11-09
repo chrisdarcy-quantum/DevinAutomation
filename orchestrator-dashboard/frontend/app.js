@@ -84,6 +84,13 @@ const api = {
     return fetchJson(`${API_BASE_URL}/api/repositories/${repositoryId}/flag-comparison`);
   },
 
+  async markRemovalMerged(id, mergedBy = null) {
+    const params = mergedBy ? `?merged_by=${encodeURIComponent(mergedBy)}` : '';
+    return fetchJson(`${API_BASE_URL}/api/removals/${id}/mark-merged${params}`, {
+      method: 'POST'
+    });
+  },
+
   streamStatus(id, onUpdate) {
     if (state.eventSource) {
       state.eventSource.close();
@@ -512,7 +519,20 @@ function renderRequestCard(request) {
               ${request.preserve_mode ? ` • Preserve: ${request.preserve_mode}` : ''}
             </p>
           </div>
-          <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayTextWithSpinner(request.status)}</span>
+          <div class="flex items-center gap-2">
+            <span class="badge ${getStatusBadgeClass(request.status)}">${getStatusDisplayTextWithSpinner(request.status)}</span>
+            ${request.merged_at ? (
+              request.ld_archived_at ? 
+                '<span class="badge badge-default text-xs">Merged ✅</span>' :
+                request.ld_archive_error ?
+                  '<span class="badge badge-secondary text-xs" title="' + request.ld_archive_error + '">Merged ✅ • LD failed</span>' :
+                  '<span class="badge badge-secondary text-xs">Merged ✅</span>'
+            ) : (
+              request.status === 'completed' ?
+                '<button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); handleMarkMerged(' + request.id + ')" id="merge-btn-' + request.id + '">Merged?</button>' :
+                ''
+            )}
+          </div>
         </div>
         <div class="grid grid-cols-2 gap-4 text-sm mb-4">
           <div>
@@ -831,6 +851,34 @@ async function handleRemoveFlagSubmit(event, repositoryId, flagKey, provider) {
 
 
 
+
+async function handleMarkMerged(removalId) {
+  const button = document.getElementById(`merge-btn-${removalId}`);
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></span>';
+  }
+  
+  try {
+    const result = await api.markRemovalMerged(removalId);
+    
+    if (result.ld_archived) {
+      showToast('Flag marked as merged and archived in LaunchDarkly');
+    } else if (result.ld_archive_error) {
+      showToast('Flag marked as merged, but LaunchDarkly update failed. You can retry.', 'error');
+    } else {
+      showToast('Flag marked as merged');
+    }
+    
+    loadRequests();
+  } catch (error) {
+    showToast(error.message, 'error');
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = 'Merged?';
+    }
+  }
+}
 
 function handleFilterChange(event) {
   setState({ statusFilter: event.target.value });
